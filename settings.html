@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Коммутаторы — настройки</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-inner" style="padding-bottom:16px">
+    <div class="ident">
+      <div class="eyebrow"><a href="index.html" class="back">← К просмотру конфигураций</a></div>
+      <h1 style="font-family:var(--sans)">Коммутаторы</h1>
+      <div class="meta">Адреса и учётные данные для подключения по SSH</div>
+    </div>
+    <div class="top-actions">
+      <button class="btn" id="fetchAll">Забрать конфигурацию со всех</button>
+      <button class="btn primary" id="addBtn">+ Добавить коммутатор</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="card" id="noServer" hidden>
+    <h2>Сервер не запущен</h2>
+    <p class="hint" style="margin:0">Эта страница работает только через локальный сервер. Запустите <code>start.bat</code> (или <code>node server.js</code>) и откройте <code>http://127.0.0.1:8080/settings.html</code>.</p>
+  </div>
+
+  <div class="card form-card" id="formCard" hidden>
+    <div class="card-head"><h2 id="formTitle">Новый коммутатор</h2></div>
+    <form id="swForm" autocomplete="off">
+      <div class="form-grid">
+        <label class="field">Название
+          <input name="name" required placeholder="Например, 3 этаж">
+        </label>
+        <label class="field">IP-адрес или имя
+          <input name="host" required placeholder="192.168.1.1" inputmode="decimal">
+        </label>
+        <label class="field narrow">Порт SSH
+          <input name="port" type="number" min="1" max="65535" value="22">
+        </label>
+        <label class="field">Логин
+          <input name="user" required placeholder="admin" autocomplete="off">
+        </label>
+        <label class="field">Пароль
+          <span class="pw">
+            <input name="password" type="password" autocomplete="new-password" placeholder="">
+            <button type="button" class="btn ghost icon" id="pwToggle" title="Показать пароль" aria-label="Показать пароль">👁</button>
+          </span>
+          <small class="muted" id="pwHint"></small>
+        </label>
+      </div>
+      <label class="chk" id="clearPwRow" hidden><input type="checkbox" name="clearPassword"> удалить сохранённый пароль</label>
+      <div class="form-actions">
+        <button type="submit" class="btn primary">Сохранить</button>
+        <button type="button" class="btn" id="saveFetch">Сохранить и забрать конфигурацию</button>
+        <button type="button" class="btn" id="testBtn">Проверить подключение</button>
+        <button type="button" class="btn ghost" id="cancelBtn">Отмена</button>
+        <span class="form-status" id="formStatus"></span>
+      </div>
+    </form>
+  </div>
+
+  <div class="card" id="listCard">
+    <div class="table-scroll">
+      <table class="tbl static" id="swTable">
+        <thead><tr><th>Название</th><th>Адрес</th><th>Логин</th><th>Пароль</th><th>Конфигурация</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="emptyState" hidden>
+      Коммутаторов пока нет. Нажмите «Добавить коммутатор», укажите IP-адрес, логин и пароль.
+    </div>
+  </div>
+
+  <p class="hint">🔒 Пароли хранятся в <code>data/switches.json</code> в зашифрованном виде (Windows DPAPI): расшифровать их может только ваша учётная запись Windows на этом компьютере. В браузер пароли не передаются. Сервер доступен только с этого компьютера (127.0.0.1).</p>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+<script src="settings.js"></script>
+</body>
+</html>

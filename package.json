@@ -1,0 +1,19 @@
+{
+  "name": "switchconfig",
+  "version": "1.0.0",
+  "description": "Просмотр конфигурации коммутатора Huawei",
+  "main": "fetch-config.js",
+  "scripts": {
+    "fetch": "node fetch-config.js",
+    "update": "node update-config.js",
+    "watch": "node update-config.js --watch",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  }
+}

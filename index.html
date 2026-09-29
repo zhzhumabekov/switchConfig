@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Конфигурация коммутатора</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-inner">
+    <div class="ident">
+      <div class="eyebrow">Huawei · стек коммутаторов</div>
+      <h1 id="sysname">—</h1>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="top-actions">
+      <select id="swSelect" class="sw-select" hidden aria-label="Коммутатор"></select>
+      <button class="btn" id="refreshBtn" hidden>Обновить с коммутатора</button>
+      <a class="btn" id="settingsLink" href="settings.html" hidden>Настройки</a>
+      <label class="btn" id="fileBtn" title="Открыть другой конфиг (.txt / .cfg)">
+        <input type="file" id="fileInput" accept=".txt,.cfg,.conf,.log" hidden>
+        Открыть конфиг…
+      </label>
+      <button class="btn icon" id="themeBtn" title="Сменить тему" aria-label="Сменить тему">◐</button>
+    </div>
+  </div>
+  <nav class="tabs wrap" id="tabs">
+    <button data-tab="overview" class="active">Обзор</button>
+    <button data-tab="ports">Порты</button>
+    <button data-tab="vlans">VLAN</button>
+    <button data-tab="l3">L3 и маршруты</button>
+    <button data-tab="services">Сервисы</button>
+    <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="raw">Исходник</button>
+  </nav>
+</header>
+
+<main class="wrap">
+
+  <!-- ВСЕ КОММУТАТОРЫ -->
+  <section class="tab" id="tab-all" hidden>
+    <div class="stats" id="allStats"></div>
+    <div class="sw-grid" id="swGrid"></div>
+    <div class="card" id="allIssuesCard">
+      <h2>Замечания по всем коммутаторам</h2>
+      <div class="table-scroll"><table class="tbl" id="allIssues"></table></div>
+    </div>
+    <div class="card" id="matrixCard">
+      <h2>VLAN на коммутаторах</h2>
+      <p class="hint">Число — сколько портов используют VLAN как untagged (PVID). «✓» — VLAN создан, но на портах доступа не используется. Оранжевым — VLAN разрешён на портах, но не создан.</p>
+      <div class="table-scroll"><table class="tbl static matrix" id="vlanMatrix"></table></div>
+    </div>
+  </section>
+
+  <!-- ОБЗОР -->
+  <section class="tab" id="tab-overview">
+    <div class="stats" id="stats"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Передняя панель стека</h2>
+        <div class="controls">
+          <label class="sel">Подсветить VLAN
+            <select id="panelVlan"><option value="">— все —</option></select>
+          </label>
+        </div>
+      </div>
+      <p class="hint">Цвет порта — его роль. Выберите VLAN, чтобы увидеть, где он проходит: заливка — untagged (PVID), рамка — tagged. Нажмите на порт, чтобы увидеть детали.</p>
+      <div class="legend" id="legend"></div>
+      <div class="panel-scroll"><div id="panel"></div></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Ключевые подключения</h2>
+        <div id="keyLinks"></div>
+      </div>
+      <div class="card">
+        <h2>Сеть управления</h2>
+        <div id="mgmtSummary"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ПОРТЫ -->
+  <section class="tab" id="tab-ports" hidden>
+    <div class="card">
+      <h2>Профили портов</h2>
+      <p class="hint">Порты с одинаковыми настройками собраны в группы. Нажмите на группу, чтобы отфильтровать таблицу ниже.</p>
+      <div id="profiles"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Все порты</h2>
+        <div class="controls">
+          <input type="search" id="portSearch" placeholder="Поиск: порт, описание, VLAN…">
+          <select id="portMember"><option value="">Все члены стека</option></select>
+          <select id="portRole"><option value="">Все роли</option></select>
+          <select id="portVlan"><option value="">Любой VLAN</option></select>
+          <label class="chk"><input type="checkbox" id="portHideEmpty" checked> скрыть ненастроенные</label>
+          <button class="btn ghost" id="portReset">Сбросить</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table class="tbl" id="portTable">
+          <thead><tr>
+            <th>Порт</th><th>Роль</th><th>Описание</th><th>PVID</th><th>Разрешённые VLAN</th><th>Опции</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="foot" id="portFoot"></div>
+    </div>
+  </section>
+
+  <!-- VLAN -->
+  <section class="tab" id="tab-vlans" hidden>
+    <div class="vlan-grid" id="vlanGrid"></div>
+  </section>
+
+  <!-- L3 -->
+  <section class="tab" id="tab-l3" hidden>
+    <div class="card">
+      <h2>L3-интерфейсы (Vlanif)</h2>
+      <div class="table-scroll"><table class="tbl" id="l3Table"></table></div>
+    </div>
+    <div class="card">
+      <h2>Статические маршруты</h2>
+      <div class="table-scroll"><table class="tbl" id="routeTable"></table></div>
+    </div>
+  </section>
+
+  <!-- СЕРВИСЫ -->
+  <section class="tab" id="tab-services" hidden>
+    <div class="svc-grid" id="servicesGrid"></div>
+  </section>
+
+  <!-- ЗАМЕЧАНИЯ -->
+  <section class="tab" id="tab-issues" hidden>
+    <p class="hint">Найдено автоматическим анализом конфигурации. Это подсказки для проверки, а не окончательный вердикт.</p>
+    <div id="issuesList"></div>
+  </section>
+
+  <!-- ИСХОДНИК -->
+  <section class="tab" id="tab-raw" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>Исходная конфигурация</h2>
+        <div class="controls">
+          <input type="search" id="rawSearch" placeholder="Фильтр по тексту…">
+          <button class="btn ghost" id="rawExpand">Развернуть всё</button>
+          <button class="btn ghost" id="rawCollapse">Свернуть всё</button>
+        </div>
+      </div>
+      <p class="hint">Пароли, ключи RADIUS и SNMP community скрыты (******).</p>
+      <div id="rawList"></div>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <h3 id="drawerTitle"></h3>
+    <button class="btn icon" id="drawerClose" aria-label="Закрыть">✕</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
+<div class="tip" id="tip" hidden></div>
+<div class="toast" id="toast" hidden></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
