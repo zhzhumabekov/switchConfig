@@ -34,6 +34,7 @@
     <button data-tab="l3">L3 и маршруты</button>
     <button data-tab="services">Сервисы</button>
     <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="hw" id="hwTabBtn" hidden>Оборудование <span class="count" id="hwCount"></span></button>
     <button data-tab="standard" id="standardTabBtn" hidden>Эталон <span class="count" id="stdCount"></span></button>
     <button data-tab="history" id="historyTabBtn" hidden>История</button>
     <button data-tab="raw">Исходник</button>
@@ -53,6 +54,18 @@
       <div id="allEvents"></div>
     </div>
     <div class="sw-grid" id="swGrid"></div>
+    <div class="card" id="mapCard" hidden>
+      <div class="card-head">
+        <h2>Схема сети</h2>
+        <span class="muted" style="font-size:12.5px">по данным LLDP · нажмите на коммутатор, чтобы открыть его</span>
+      </div>
+      <div class="map-scroll"><div id="netMap"></div></div>
+      <div class="legend" id="mapLegend"></div>
+    </div>
+    <div class="card" id="hwTableCard" hidden>
+      <h2>Оборудование и прошивки</h2>
+      <div class="table-scroll"><table class="tbl" id="hwTable"></table></div>
+    </div>
     <div class="card" id="allStdCard" hidden>
       <div class="card-head">
         <h2>Соответствие эталону</h2>
@@ -180,6 +193,24 @@
     <div id="issuesList"></div>
   </section>
 
+  <!-- ОБОРУДОВАНИЕ -->
+  <section class="tab" id="tab-hw" hidden>
+    <div class="card" id="hwProblemsCard" hidden>
+      <h2>Проблемы оборудования</h2>
+      <div id="hwProblems"></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h2>Устройство и стек</h2><div id="hwDevice"></div></div>
+      <div class="card"><h2>Нагрузка, температура, питание</h2><div id="hwEnv"></div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>SFP-модули</h2>
+      <p class="hint">Уровень сигнала оптики: приём (Rx) и передача (Tx) в дБм и пороги модуля. Сигнал близко к нижнему порогу — признак грязного разъёма, повреждённого волокна или изношенного модуля.</p>
+      <div id="hwSfp"></div>
+    </div>
+    <p class="hint" id="hwNote"></p>
+  </section>
+
   <!-- ЭТАЛОН -->
   <section class="tab" id="tab-standard" hidden>
     <div class="card" id="stdSummary"></div>
@@ -206,6 +237,7 @@
             <option value="devices">Устройства (новые, переезды)</option>
             <option value="ports">Порты (петли, аплинки, ошибки)</option>
             <option value="config">Изменения конфигурации</option>
+            <option value="hardware">Оборудование (питание, вентиляторы, SFP…)</option>
             <option value="reach">Доступность коммутатора</option>
           </select>
         </div>

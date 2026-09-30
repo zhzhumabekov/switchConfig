@@ -454,3 +454,30 @@ a.btn { text-decoration: none; }
 .std-form textarea, .std-form .field input { font: 12.5px/1.5 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; resize: vertical; }
 .std-form .chk { color: var(--text); }
 .row-chk { display: flex; gap: 14px; }
+
+/* ---------- оборудование и схема сети ---------- */
+.bar { display: inline-block; vertical-align: middle; width: 120px; height: 8px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: #2e8b57; }
+.bar.mid > span { background: var(--sev-med); }
+.bar.bad > span { background: var(--sev-high); }
+
+.map-scroll { overflow-x: auto; }
+#netMap svg { display: block; margin: 0 auto; max-width: none; }
+.m-edge line { stroke: var(--muted); stroke-width: 2; }
+.m-edge.up line { stroke: #2e8b57; }
+.m-edge.down line { stroke: var(--sev-high); stroke-dasharray: 6 4; }
+.m-port, .m-count { font: 11px var(--mono); fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+.m-count { fill: var(--text); font-weight: 600; }
+.m-node rect { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; }
+.m-node.ok rect { stroke: #2e8b57; }
+.m-node.warn rect { stroke: var(--sev-med); stroke-width: 2; }
+.m-node.err rect { stroke: var(--sev-high); stroke-width: 2; stroke-dasharray: 5 3; }
+.m-node.ext rect { stroke: var(--muted); stroke-dasharray: 4 3; fill: var(--surface-2); }
+.m-node[data-open-sw] { cursor: pointer; }
+.m-node[data-open-sw]:hover rect { stroke-width: 3; }
+.m-name { font: 600 13px var(--sans); fill: var(--text); }
+.m-sub { font: 11px var(--mono); fill: var(--muted); }
+.m-sw { width: 14px; height: 10px; border-radius: 3px; border: 2px solid var(--accent); display: inline-block; }
+.m-sw.ok { border-color: #2e8b57; } .m-sw.warn { border-color: var(--sev-med); } .m-sw.err { border-color: var(--sev-high); border-style: dashed; } .m-sw.ext { border-color: var(--muted); border-style: dashed; }
+.m-ln { width: 18px; height: 0; border-top: 2px solid #2e8b57; display: inline-block; }
+.m-ln.down { border-top: 2px dashed var(--sev-high); }

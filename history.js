@@ -125,6 +125,14 @@ function onState(sw, prev, cur, configText, directory) {
     }
   }
 
+  // 1б. Оборудование: новые и устранённые проблемы (температура, питание, SFP…)
+  if (prev && prev.hw && cur.hw) {
+    const before = new Map((prev.hw.problems || []).map(p => [p.key, p]));
+    const now = new Map((cur.hw.problems || []).map(p => [p.key, p]));
+    for (const [k, p] of now) if (!before.has(k)) add({ type: 'hw', sev: p.sev, port: p.port, text: p.text });
+    for (const [k, p] of before) if (!now.has(k)) add({ type: 'hw-ok', sev: 'info', port: p.port, text: `Устранено: ${p.text}` });
+  }
+
   // 2. Устройства: где видно каждый MAC на конечных портах
   const db = loadDevices();
   const firstRun = !db.baselined[sw.id];

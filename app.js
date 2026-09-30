@@ -387,6 +387,11 @@ function attachState(cfg, st) {
   const upDown = ports.filter(p => ['uplink', 'link'].includes(p.role) && p.st.status !== 'up');
   if (upDown.length) cfg.issues.push({ kind: 'uplink-down', sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
   const errs = ports.filter(p => p.st.inErr + p.st.outErr > 0);
+  for (const pr of (st.hw && st.hw.problems) || []) {
+    const port = pr.port && cfg.ports.find(x => x.name === pr.port);
+    cfg.issues.push({ kind: 'hw', data: { key: pr.key, cmd: pr.cmd }, sev: pr.sev, live: true, title: pr.text,
+      body: 'Обнаружено по данным оборудования (display device / power / fan / temperature / transceiver).', ports: port ? [port] : undefined });
+  }
   if (errs.length) cfg.issues.push({ kind: 'port-errors', sev: 'med', live: true, title: 'Ошибки на портах', body: 'Счётчики inErrors/outErrors не нулевые: возможна плохая линия, кабель или несогласованная скорость/дуплекс.', ports: errs });
   const order = { high: 0, med: 1, info: 2 };
   cfg.issues.sort((a, b) => order[a.sev] - order[b.sev]);
@@ -549,7 +554,8 @@ function render(cfg, sw = null) {
   renderRaw(cfg);
   renderHistory(sw);
   renderStandard(cfg, sw);
-  showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) ? 'overview' : state.tab);
+  renderHardware(cfg, sw);
+  showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) || (state.tab === 'hw' && $('#hwTabBtn').hidden) ? 'overview' : state.tab);
 }
 
 function ago(iso) {
@@ -1188,6 +1194,10 @@ function renderAll() {
     </div>`;
   }).join('');
 
+  // Схема сети и оборудование
+  renderMap(withCfg);
+  renderHwTable(withCfg);
+
   // Соответствие эталону
   renderStdMatrix(withCfg);
 
@@ -1353,7 +1363,7 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
@@ -1361,6 +1371,7 @@ const EV_GROUPS = {
   ports: e => ['loop', 'loop-cleared', 'uplink-down', 'uplink-up', 'errors'].includes(e.type),
   config: e => e.type === 'config-changed',
   reach: e => ['unreachable', 'recovered'].includes(e.type),
+  hardware: e => ['hw', 'hw-ok'].includes(e.type),
 };
 
 function fmtTime(iso) {
@@ -1491,6 +1502,205 @@ async function poll() {
     }
     pollSig = sig;
   } catch (e) { /* сервер недоступен — попробуем позже */ }
+}
+
+/* ---------- оборудование и схема сети (этап 5) ---------- */
+const HW_CMDS = ['display version', 'display device', 'display stack', 'display cpu-usage', 'display memory-usage', 'display temperature all', 'display power', 'display fan', 'display transceiver verbose'];
+
+function fmtUptime(sec) {
+  if (sec == null) return '—';
+  const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600);
+  return d ? `${d} ${plural(d, 'день', 'дня', 'дней')}${hh ? ` ${hh} ч` : ''}` : `${hh} ч ${Math.floor((sec % 3600) / 60)} мин`;
+}
+function bar(pct, warn = 80, bad = 95) {
+  if (pct == null) return '<span class="muted">—</span>';
+  const cls = pct >= bad ? 'bad' : pct >= warn ? 'mid' : 'ok';
+  return `<span class="bar ${cls}"><span style="width:${Math.min(100, pct)}%"></span></span> <b>${pct}%</b>`;
+}
+const stateOk = v => /^(normal|supply|ok|on)$/i.test(v || '');
+
+function renderHardware(cfg, sw) {
+  const hw = cfg.state && cfg.state.hw;
+  const on = !!hw;
+  $('#hwTabBtn').hidden = !on;
+  if (!on) return;
+  const probs = hw.problems || [];
+  $('#hwCount').textContent = probs.filter(p => p.sev !== 'info').length || '';
+  const SEV = { high: 'Важно', med: 'Внимание', info: 'Инфо' };
+  $('#hwProblemsCard').hidden = !probs.length;
+  $('#hwProblems').innerHTML = probs.map(p => `<div class="issue sev-${p.sev}" style="padding:8px 12px">
+      <div class="ih"><span class="sev">${SEV[p.sev]}</span><span class="it">${esc(p.text)}</span>
+      ${p.port ? `<button class="plink" data-port="${esc(p.port)}">открыть порт</button>` : ''}</div>
+      ${fixHtml({ kind: 'hw', data: { key: p.key, cmd: p.cmd } }, cfg)}</div>`).join('');
+
+  const v = hw.version || {};
+  const dev = hw.device || [];
+  const members = (hw.stack && hw.stack.members) || [];
+  const slots = [...new Set([...dev.map(d => d.slot), ...members.map(m => m.slot)])].sort((a, b) => a - b);
+  $('#hwDevice').innerHTML = `<dl class="kv">
+      <dt>Модель</dt><dd>${esc(v.model || (dev[0] && dev[0].type) || '—')}</dd>
+      <dt>ПО</dt><dd>${esc(v.software || cfg.version || '—')}${v.patch ? ` · патч ${esc(v.patch)}` : ''}</dd>
+      <dt>Работает без перезагрузки</dt><dd>${esc(fmtUptime(v.uptimeSec))}</dd>
+      <dt>Стек</dt><dd>${hw.stack && hw.stack.topology ? `${esc(hw.stack.topology)}${/ring/i.test(hw.stack.topology) ? ' (кольцо)' : /chain|link/i.test(hw.stack.topology) ? ' (цепочка)' : ''}` : '—'}</dd>
+    </dl>
+    ${slots.length ? `<table class="tbl static" style="margin-top:10px"><thead><tr><th>Слот</th><th>Роль</th><th>Модель</th><th>Состояние</th></tr></thead><tbody>
+      ${slots.map(sl => { const d = dev.find(x => x.slot === sl) || {}, m = members.find(x => x.slot === sl) || {};
+        return `<tr><td>${sl}</td><td>${esc(m.role || d.role || '—')}</td><td class="mono">${esc(d.type || m.type || '—')}</td>
+          <td>${d.status ? `<span class="flag ${/^normal$/i.test(d.status) ? '' : 'warn'}">${esc(d.status)}</span>` : '—'}</td></tr>`; }).join('')}
+    </tbody></table>` : ''}`;
+
+  const temps = hw.temperature || [];
+  $('#hwEnv').innerHTML = `<dl class="kv">
+      <dt>CPU</dt><dd>${bar(hw.cpu && hw.cpu.now)}${hw.cpu && hw.cpu.max != null ? ` <span class="muted">макс. ${hw.cpu.max}%</span>` : ''}</dd>
+      <dt>Память</dt><dd>${bar(hw.memory && hw.memory.percent, 85, 95)}</dd>
+    </dl>
+    ${temps.length ? `<div class="sub">Температура</div><table class="tbl static"><thead><tr><th>Слот</th><th>Сейчас</th><th>Порог</th><th>Состояние</th></tr></thead><tbody>
+      ${temps.map(t => `<tr><td>${t.slot}</td><td><b>${t.current}°C</b></td><td>${t.upper != null ? t.upper + '°C' : '—'}</td>
+        <td><span class="flag ${t.status === 'NORMAL' && !(t.upper != null && t.current >= t.upper - 5) ? '' : 'warn'}">${esc(t.status)}</span></td></tr>`).join('')}</tbody></table>` : ''}
+    ${(hw.power || []).length ? `<div class="sub">Питание</div><table class="tbl static"><thead><tr><th>Слот</th><th>Блок</th><th>Установлен</th><th>Состояние</th><th>Вт</th></tr></thead><tbody>
+      ${hw.power.map(p => `<tr><td>${p.slot}</td><td>${esc(p.id)}</td><td>${esc(p.online)}</td>
+        <td>${/^absent$/i.test(p.online) ? '<span class="muted">—</span>' : `<span class="flag ${stateOk(p.state) ? '' : 'warn'}">${esc(p.state)}</span>`}</td><td>${p.watts ?? '—'}</td></tr>`).join('')}</tbody></table>` : ''}
+    ${(hw.fan || []).length ? `<div class="sub">Вентиляторы</div><table class="tbl static"><thead><tr><th>Слот</th><th>Модуль</th><th>Состояние</th><th>Скорость</th></tr></thead><tbody>
+      ${hw.fan.map(f => `<tr><td>${f.slot}</td><td>${esc(f.id)}</td><td><span class="flag ${stateOk(f.status) ? '' : 'warn'}">${esc(f.status)}</span></td><td>${f.speed != null ? f.speed + '%' : '—'}</td></tr>`).join('')}</tbody></table>` : ''}`;
+
+  const sfp = Object.entries(hw.transceiver || {});
+  const probKeys = new Map(probs.map(p => [p.key, p]));
+  const dbm = (v, lo, hi) => v == null ? '<span class="muted">—</span>'
+    : `<b>${v}</b>${lo != null || hi != null ? ` <span class="muted">(${lo ?? '…'} … ${hi ?? '…'})</span>` : ''}`;
+  $('#hwSfp').innerHTML = sfp.length ? `<div class="table-scroll"><table class="tbl"><thead><tr><th>Порт</th><th>Сейчас</th><th>Модуль</th><th>λ, нм</th><th>Rx, дБм (пороги)</th><th>Tx, дБм (пороги)</th><th>t°C</th><th>Оценка</th></tr></thead><tbody>
+    ${sfp.sort((a, b) => a[0].localeCompare(b[0], 'en', { numeric: true })).map(([port, x]) => {
+      const p = cfg.ports.find(y => y.name === port);
+      const pr = probKeys.get('sfp-rx:' + port) || probKeys.get('sfp-tx:' + port);
+      return `<tr data-port="${esc(port)}">
+        <td class="mono"><b>${esc(shortName(port))}</b>${p && p.desc ? ` <span class="muted">${esc(p.desc)}</span>` : ''}</td>
+        <td>${p ? liveBadge(p) : '—'}</td>
+        <td>${esc(x.type || '—')}<div class="muted" style="font-size:12px">${esc([x.vendor, x.part].filter(Boolean).join(' · '))}</div></td>
+        <td>${esc(x.wavelength || '—')}</td>
+        <td>${dbm(x.rx, x.rxLow, x.rxHigh)}</td>
+        <td>${dbm(x.tx, x.txLow, x.txHigh)}</td>
+        <td>${x.temp ?? '—'}</td>
+        <td>${pr ? `<span class="flag warn">${pr.sev === 'high' ? 'плохо' : 'на грани'}</span>` : (p && p.st && p.st.status === 'up' && x.rx != null ? '<span class="flag">норма</span>' : '<span class="muted">—</span>')}</td>
+      </tr>`; }).join('')}
+    </tbody></table></div>` : '<p class="muted" style="margin:0">SFP-модули не найдены (или команда не поддерживается).</p>';
+
+  const failed = HW_CMDS.filter(c => cfg.state.errors && cfg.state.errors[c]);
+  $('#hwNote').textContent = `Данные ${ago(cfg.state.at)}.` + (failed.length ? ` Не поддерживаются этим коммутатором: ${failed.join(', ')}.` : '');
+}
+
+// Граф связей по LLDP: коммутаторы из списка и соседние коммутаторы, которых в списке нет
+function topology(list) {
+  const key = n => String(n || '').trim().toUpperCase();
+  const nodes = new Map();
+  for (const { sw, cfg } of list) nodes.set(key(cfg.sysname || sw.name), { id: key(cfg.sysname || sw.name), name: sw.name, sw, cfg, managed: true });
+  const edges = new Map();
+  for (const { sw, cfg } of list) {
+    const a = key(cfg.sysname || sw.name);
+    for (const p of cfg.ports) for (const n of p.lldp || []) {
+      const b = key(n.device);
+      if (!b || b === a) continue;
+      const known = nodes.has(b) && nodes.get(b).managed;
+      // Телефоны и точки доступа на пользовательских портах на схему не выносим
+      if (!known && !['uplink', 'link', 'trunk'].includes(p.role) && (p.macs || []).length <= 5) continue;
+      if (!nodes.has(b)) nodes.set(b, { id: b, name: n.device, managed: false });
+      const [x, y] = [a, b].sort();
+      const ek = x + '||' + y;
+      if (!edges.has(ek)) edges.set(ek, { a: x, b: y, links: [] });
+      const e = edges.get(ek);
+      const mine = p.short, theirs = shortName(n.remotePort || '');
+      const rec = a === x ? { pa: mine, pb: theirs } : { pa: theirs, pb: mine };
+      const up = p.st ? p.st.status === 'up' : null;
+      const same = e.links.find(l => l.pa === rec.pa && l.pb === rec.pb);
+      if (same) { if (up === false) same.up = false; } else e.links.push({ ...rec, up });
+    }
+  }
+  return { nodes: [...nodes.values()], edges: [...edges.values()] };
+}
+
+function renderMap(withCfg) {
+  const withLive = withCfg.filter(s => s.cfg.state).map(s => ({ sw: s, cfg: s.cfg }));
+  const { nodes, edges } = topology(withLive);
+  $('#mapCard').hidden = !withLive.length;
+  if (!withLive.length) return;
+  if (!edges.length) {
+    $('#netMap').innerHTML = '<p class="muted" style="margin:0">Связи между коммутаторами по LLDP не найдены. Проверьте, что LLDP включён на коммутаторах и на аплинках.</p>';
+    $('#mapLegend').innerHTML = '';
+    return;
+  }
+  // Уровни: обход в ширину от узла с наибольшим числом связей
+  const deg = new Map(nodes.map(n => [n.id, 0]));
+  for (const e of edges) { deg.set(e.a, deg.get(e.a) + 1); deg.set(e.b, deg.get(e.b) + 1); }
+  const adj = new Map(nodes.map(n => [n.id, []]));
+  for (const e of edges) { adj.get(e.a).push(e.b); adj.get(e.b).push(e.a); }
+  const level = new Map();
+  const order = [...nodes].sort((a, b) => deg.get(b.id) - deg.get(a.id) || (b.managed - a.managed));
+  for (const start of order) {
+    if (level.has(start.id)) continue;
+    const base = level.size ? Math.max(...level.values()) + 1 : 0;
+    level.set(start.id, base);
+    const q = [start.id];
+    while (q.length) { const c = q.shift(); for (const nb of adj.get(c)) if (!level.has(nb)) { level.set(nb, level.get(c) + 1); q.push(nb); } }
+  }
+  const rows = [];
+  for (const n of nodes) (rows[level.get(n.id)] ||= []).push(n);
+  const W = 170, H = 50, colW = 200, rowH = 130;
+  const width = Math.max(640, Math.max(...rows.map(r => (r || []).length)) * colW);
+  const height = rows.length * rowH + 20;
+  const pos = new Map();
+  rows.forEach((r, li) => (r || []).forEach((n, i) => pos.set(n.id, { x: (i + 0.5) * width / r.length, y: 40 + li * rowH })));
+
+  const lines = edges.map(e => {
+    const A = pos.get(e.a), B = pos.get(e.b);
+    const down = e.links.some(l => l.up === false), up = e.links.every(l => l.up === true);
+    const cls = down ? 'down' : up ? 'up' : 'unk';
+    // Подпись порта — сразу за краем прямоугольника узла, на линии связи
+    const lab = (t, from, to) => {
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const k = Math.min(0.45, Math.min(dy ? (H / 2 + 14) / Math.abs(dy) : Infinity, dx ? (W / 2 + 22) / Math.abs(dx) : Infinity));
+      return `<text class="m-port" x="${from.x + dx * k}" y="${from.y + dy * k + 4}" text-anchor="middle">${esc(t)}</text>`;
+    };
+    const pa = e.links.map(l => l.pa).filter(Boolean).join(', '), pb = e.links.map(l => l.pb).filter(Boolean).join(', ');
+    const title = e.links.map(l => `${l.pa || '?'} ↔ ${l.pb || '?'}${l.up === false ? ' (не работает)' : ''}`).join('\n');
+    return `<g class="m-edge ${cls}"><title>${esc(title)}</title><line x1="${A.x}" y1="${A.y}" x2="${B.x}" y2="${B.y}"/>${e.links.length > 1 ? `<text class="m-count" x="${(A.x + B.x) / 2}" y="${(A.y + B.y) / 2 - 4}" text-anchor="middle">${e.links.length}×</text>` : ''}${lab(pa, A, B)}${lab(pb, B, A)}</g>`;
+  }).join('');
+  const boxes = nodes.map(n => {
+    const { x, y } = pos.get(n.id);
+    const hwp = n.managed && n.cfg.state && n.cfg.state.hw ? n.cfg.state.hw.problems.filter(p => p.sev === 'high').length : 0;
+    const high = n.managed ? n.cfg.issues.filter(i => i.sev === 'high').length : 0;
+    const cls = !n.managed ? 'ext' : n.sw.lastError ? 'err' : (hwp || high) ? 'warn' : 'ok';
+    const sub = n.managed ? ((n.cfg.state.hw && n.cfg.state.hw.version.model) || n.sw.host) : 'нет в списке';
+    const nm = n.name.length > 22 ? n.name.slice(0, 21) + '…' : n.name;
+    return `<g class="m-node ${cls}" ${n.managed ? `data-open-sw="${esc(n.sw.id)}"` : ''} transform="translate(${x - W / 2},${y - H / 2})">
+      <title>${esc(n.name)}${n.managed ? '' : ' — этого коммутатора нет в списке'}</title>
+      <rect width="${W}" height="${H}" rx="8"/><text class="m-name" x="${W / 2}" y="21" text-anchor="middle">${esc(nm)}</text>
+      <text class="m-sub" x="${W / 2}" y="38" text-anchor="middle">${esc(sub)}</text></g>`;
+  }).join('');
+  $('#netMap').innerHTML = `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="Схема сети">${lines}${boxes}</svg>`;
+  $('#mapLegend').innerHTML = [
+    ['ok', 'коммутатор из списка'], ['warn', 'есть важные замечания'], ['err', 'не отвечает'], ['ext', 'сосед, которого нет в списке'],
+  ].map(([c, t]) => `<span class="legend-st"><span class="m-sw ${c}"></span>${t}</span>`).join('') +
+    '<span class="legend-st"><span class="m-ln up"></span>линк работает</span><span class="legend-st"><span class="m-ln down"></span>не работает</span>';
+}
+
+function renderHwTable(withCfg) {
+  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.hw);
+  $('#hwTableCard').hidden = !rows.length;
+  if (!rows.length) return;
+  $('#hwTable').innerHTML = `<thead><tr><th>Коммутатор</th><th>Модель</th><th>ПО</th><th>Без перезагрузки</th><th>CPU</th><th>Память</th><th>Макс. t°</th><th>Проблемы</th></tr></thead><tbody>` +
+    rows.map(s => {
+      const hw = s.cfg.state.hw, v = hw.version || {};
+      const maxT = (hw.temperature || []).reduce((m, t) => Math.max(m, t.current), -Infinity);
+      const pr = hw.problems || [];
+      return `<tr data-open-sw="${esc(s.id)}" data-open-tab="hw">
+        <td><b>${esc(s.name)}</b></td>
+        <td class="mono">${esc(v.model || '—')}${s.cfg.members.length > 1 ? ` <span class="muted">× ${s.cfg.members.length}</span>` : ''}</td>
+        <td class="mono">${esc(v.software || s.cfg.version || '—')}</td>
+        <td>${esc(fmtUptime(v.uptimeSec))}</td>
+        <td>${hw.cpu && hw.cpu.now != null ? hw.cpu.now + '%' : '—'}</td>
+        <td>${hw.memory && hw.memory.percent != null ? hw.memory.percent + '%' : '—'}</td>
+        <td>${Number.isFinite(maxT) ? maxT + '°C' : '—'}</td>
+        <td>${pr.length ? pr.map(p => `<span class="flag ${p.sev === 'info' ? '' : 'warn'}" title="${esc(p.text)}">${esc(p.text.length > 40 ? p.text.slice(0, 39) + '…' : p.text)}</span>`).join(' ') : '<span class="flag">норма</span>'}</td>
+      </tr>`;
+    }).join('') + '</tbody>';
 }
 
 /* ---------- эталон (этап 4) ---------- */

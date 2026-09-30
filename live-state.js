@@ -1,10 +1,13 @@
 // Разбор «живого» состояния коммутатора Huawei VRP: статус портов, LLDP-соседи,
 // таблица MAC-адресов и ARP. Все команды только читают данные.
+const hardware = require('./hardware');
+
 const COMMANDS = {
   interfaces: 'display interface brief',
   lldp: 'display lldp neighbor brief',
   mac: 'display mac-address',
   arp: 'display arp',
+  ...hardware.COMMANDS,
 };
 
 const MAC_RE = /^([0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4})$/i;
@@ -132,9 +135,11 @@ function parseAll(raw, at = new Date().toISOString()) {
     const e = raw[k] == null ? 'не выполнялась' : commandError(raw[k]);
     if (e) errors[cmd] = e;
   }
+  const interfaces = parseInterfaces(raw.interfaces);
   return {
     at,
-    interfaces: parseInterfaces(raw.interfaces),
+    interfaces,
+    hw: hardware.parseHardware(raw, interfaces),
     lldp: parseLldp(raw.lldp),
     mac: parseMac(raw.mac),
     arp: parseArp(raw.arp),
