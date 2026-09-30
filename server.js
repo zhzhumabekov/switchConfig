@@ -7,9 +7,11 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const store = require('./store');
-const { runCommands, fetchConfig, extract, humanError } = require('./fetch-config');
-const live = require('./live-state');
+const { fetchConfig, humanError } = require('./fetch-config');
 const directory = require('./directory');
+const collector = require('./collector');
+const history = require('./history');
+const scheduler = require('./scheduler');
 const { redact } = require('./update-config');
 
 const PORT = +process.env.PORT || 8080;
@@ -18,11 +20,10 @@ const HOST = '127.0.0.1';
 // Отдаём только эти файлы — конфиги с секретами и data/ наружу не попадают
 const STATIC = {
   '/': 'index.html', '/index.html': 'index.html', '/settings.html': 'settings.html',
-  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js',
+  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js',
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
-const busy = new Set(); // id коммутаторов, с которых сейчас забираются данные
 
 /* ---------- вспомогательное ---------- */
 function send(res, status, data) {
@@ -49,7 +50,7 @@ function publicView(s) {
     id: s.id, name: s.name, host: s.host, port: s.port, user: s.user,
     hasPassword: !!s.secret, sysname: s.sysname || '', lastFetch: s.lastFetch || null,
     lastError: s.lastError || null, lastChange: s.lastChange || null, source: s.source || '',
-    hasConfig: !!store.readConfig(s.id), stateAt: s.stateAt || null, busy: busy.has(s.id),
+    hasConfig: !!store.readConfig(s.id), stateAt: s.stateAt || null, busy: collector.busy.has(s.id),
   };
 }
 
@@ -72,54 +73,6 @@ function validate(b, partial) {
     if (!out.user) throw new HttpError(400, 'Укажите логин');
   }
   return out;
-}
-
-async function passwordFor(sw, given) {
-  if (given) return given;
-  const p = await store.decrypt(sw && sw.secret);
-  if (!p) throw new HttpError(400, 'Пароль не сохранён — укажите его в настройках');
-  return p;
-}
-
-async function doFetch(id) {
-  if (busy.has(id)) throw new HttpError(409, 'Конфигурация уже забирается');
-  const list = store.load();
-  const sw = list.find(s => s.id === id);
-  if (!sw) throw new HttpError(404, 'Коммутатор не найден');
-  busy.add(id);
-  try {
-    const password = await passwordFor(sw);
-    // Конфигурация и состояние портов — за одно подключение
-    const stateKeys = Object.keys(live.COMMANDS);
-    const outputs = await runCommands({ host: sw.host, port: sw.port, user: sw.user },
-      password, ['display current-configuration', ...stateKeys.map(k => live.COMMANDS[k])]);
-    const text = extract(outputs[0]);
-    if (!/^sysname /m.test(text)) throw new Error('Получен неполный вывод — конфигурация не сохранена');
-    const changed = store.writeConfig(id, text);
-    const raw = Object.fromEntries(stateKeys.map((k, i) => [k, outputs[i + 1]]));
-    const state = live.parseAll(raw);
-    store.writeState(id, state, raw);
-    const fresh = store.load();
-    const cur = fresh.find(s => s.id === id);
-    if (cur) {
-      cur.lastFetch = new Date().toISOString();
-      cur.lastError = null;
-      cur.sysname = (text.match(/^sysname\s+(\S+)/m) || [])[1] || cur.sysname;
-      if (changed) cur.lastChange = cur.lastFetch;
-      cur.stateAt = state.at;
-      store.save(fresh);
-    }
-    await directory.refreshIfStale(10 * 60 * 1000);
-    return { ok: true, changed, lines: text.split('\n').length - 1, stateErrors: state.errors };
-  } catch (err) {
-    const msg = err instanceof HttpError ? err.message : humanError(err);
-    const fresh = store.load();
-    const cur = fresh.find(s => s.id === id);
-    if (cur) { cur.lastError = { at: new Date().toISOString(), message: msg }; store.save(fresh); }
-    return { ok: false, error: msg };
-  } finally {
-    busy.delete(id);
-  }
 }
 
 /* ---------- API ---------- */
@@ -155,6 +108,7 @@ async function api(req, res, parts) {
     if (method === 'DELETE') {
       store.save(list.filter(s => s.id !== id));
       store.removeConfig(id);
+      history.removeSwitch(id);
       return send(res, 200, { ok: true });
     }
   }
@@ -172,7 +126,29 @@ async function api(req, res, parts) {
   }
 
   if (res1 === 'switches' && id && action === 'fetch' && method === 'POST') {
-    return send(res, 200, await doFetch(id));
+    const r = await collector.collect(id, { config: true });
+    await directory.refreshIfStale(10 * 60 * 1000);
+    return send(res, 200, r);
+  }
+
+  if (res1 === 'switches' && id && action === 'history' && method === 'GET') {
+    const ts = parts[4];
+    if (!ts) return send(res, 200, history.listVersions(id));
+    const text = history.readVersion(id, ts);
+    if (text == null) throw new HttpError(404, 'Версия не найдена');
+    return send(res, 200, redact(text));
+  }
+
+  if (res1 === 'events' && method === 'GET') {
+    const q = new URL(req.url, 'http://x').searchParams;
+    return send(res, 200, history.readEvents({ sw: q.get('sw') || undefined, limit: Math.min(+q.get('limit') || 200, 2000), before: q.get('before') || undefined }));
+  }
+
+  if (res1 === 'devices' && method === 'GET') return send(res, 200, history.loadDevices());
+
+  if (res1 === 'schedule') {
+    if (method === 'GET') return send(res, 200, scheduler.status());
+    if (method === 'PUT') { scheduler.save(await readBody(req)); return send(res, 200, scheduler.status()); }
   }
 
   if (res1 === 'directory') {
@@ -201,12 +177,7 @@ async function api(req, res, parts) {
 
   if (res1 === 'fetch-all' && method === 'POST') {
     const ids = store.load().filter(s => s.secret).map(s => s.id);
-    const results = {};
-    // Не больше 4 подключений одновременно
-    const queue = [...ids];
-    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
-      while (queue.length) { const i = queue.shift(); results[i] = await doFetch(i).catch(e => ({ ok: false, error: e.message })); }
-    }));
+    const results = await collector.collectMany(ids, { config: true });
     await directory.refreshIfStale(60 * 1000);
     return send(res, 200, results);
   }
@@ -217,11 +188,11 @@ async function api(req, res, parts) {
     const sw = b.id ? list.find(s => s.id === b.id) : null;
     const v = validate({ name: 'test', host: b.host ?? sw?.host, port: b.port ?? sw?.port, user: b.user ?? sw?.user });
     try {
-      const password = await passwordFor(sw, b.password);
+      const password = await collector.passwordFor(sw, b.password);
       const prompt = await fetchConfig({ host: v.host, port: v.port, user: v.user, testOnly: true, timeout: 25 }, password);
       return send(res, 200, { ok: true, prompt });
     } catch (err) {
-      return send(res, 200, { ok: false, error: err instanceof HttpError ? err.message : humanError(err) });
+      return send(res, 200, { ok: false, error: err.user ? err.message : humanError(err) });
     }
   }
 
@@ -253,7 +224,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)], 'Cache-Control': 'no-cache' });
     fs.createReadStream(full).pipe(res);
   } catch (err) {
-    if (!(err instanceof HttpError)) console.error(err);
+    if (!(err instanceof HttpError) && !err.user) console.error(err);
     send(res, err.status || 500, { error: err.message });
   }
 });
@@ -268,4 +239,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Сервер запущен: http://${HOST}:${PORT}/`);
   console.log(`Настройки коммутаторов: http://${HOST}:${PORT}/settings.html`);
   console.log('Ctrl+C — остановить.');
+  scheduler.start();
+  const sc = scheduler.load();
+  console.log(sc.enabled ? `Сбор по расписанию: состояние портов каждые ${sc.stateMinutes} мин, конфигурация раз в ${sc.configHours} ч.` : 'Сбор по расписанию выключен.');
 });

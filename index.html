@@ -34,6 +34,7 @@
     <button data-tab="l3">L3 и маршруты</button>
     <button data-tab="services">Сервисы</button>
     <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="history" id="historyTabBtn" hidden>История</button>
     <button data-tab="raw">Исходник</button>
   </nav>
 </header>
@@ -43,6 +44,13 @@
   <!-- ВСЕ КОММУТАТОРЫ -->
   <section class="tab" id="tab-all" hidden>
     <div class="stats" id="allStats"></div>
+    <div class="card" id="allEventsCard" hidden>
+      <div class="card-head">
+        <h2>Последние события</h2>
+        <span class="muted" id="allEventsNote" style="font-size:12.5px"></span>
+      </div>
+      <div id="allEvents"></div>
+    </div>
     <div class="sw-grid" id="swGrid"></div>
     <div class="card" id="allUnknownCard" hidden>
       <h2>Неизвестные устройства <span class="count" id="allUnknownCount"></span></h2>
@@ -164,6 +172,38 @@
     <div id="issuesList"></div>
   </section>
 
+  <!-- ИСТОРИЯ -->
+  <section class="tab" id="tab-history" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>События</h2>
+        <div class="controls">
+          <select id="evFilter">
+            <option value="">Все события</option>
+            <option value="important">Важные и «внимание»</option>
+            <option value="devices">Устройства (новые, переезды)</option>
+            <option value="ports">Порты (петли, аплинки, ошибки)</option>
+            <option value="config">Изменения конфигурации</option>
+            <option value="reach">Доступность коммутатора</option>
+          </select>
+        </div>
+      </div>
+      <div id="swEvents"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Что изменилось в конфигурации</h2>
+        <div class="controls">
+          <label class="sel">Было <select id="verA"></select></label>
+          <label class="sel">Стало <select id="verB"></select></label>
+          <label class="chk"><input type="checkbox" id="diffFull"> весь текст</label>
+        </div>
+      </div>
+      <div id="verList"></div>
+      <div id="cfgDiff"></div>
+    </div>
+  </section>
+
   <!-- ИСХОДНИК -->
   <section class="tab" id="tab-raw" hidden>
     <div class="card">
@@ -193,6 +233,7 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="config.js"></script>
+<script src="diff.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

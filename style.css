@@ -391,3 +391,27 @@ a.btn { text-decoration: none; }
 .field .chk { color: var(--text); font-size: 13px; }
 .field input[type="checkbox"] { width: auto; padding: 0; }
 .dev { white-space: nowrap; }
+
+/* ---------- история и события ---------- */
+.events { list-style: none; margin: 0; padding: 0; }
+.ev { display: grid; grid-template-columns: 92px 22px 1fr; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; align-items: baseline; }
+.ev:last-child { border-bottom: 0; }
+.ev-t { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ev.sev-high .ev-x { color: var(--sev-high); }
+.ev.sev-med .ev-x { color: var(--sev-med); }
+.ev .plink { font-family: var(--sans); font-size: 12.5px; margin-left: 6px; }
+
+.ver-list { margin-bottom: 12px; }
+.ver-list summary { cursor: pointer; font-size: 13px; margin-bottom: 8px; }
+.d-add { color: #2e8b57; font-weight: 600; }
+.d-del { color: var(--sev-high); font-weight: 600; }
+.diff-sum { font-size: 13px; margin-bottom: 8px; }
+.diff { border: 1px solid var(--border); border-radius: 6px; overflow-x: auto; font: 12.5px/1.5 var(--mono); }
+.hunk-h { background: var(--accent-soft); color: var(--accent); padding: 3px 10px; border-top: 1px solid var(--border); }
+.hunk-h:first-child { border-top: 0; }
+.dl { display: grid; grid-template-columns: 44px 44px 1fr; white-space: pre; }
+.dl .ln { color: var(--muted); text-align: right; padding-right: 8px; user-select: none; opacity: .7; }
+.dl .dt { padding-right: 12px; }
+.dl-add { background: rgba(46, 139, 87, .13); }
+.dl-del { background: rgba(200, 58, 50, .12); }
+@media (max-width: 640px) { .ev { grid-template-columns: 1fr; gap: 0; } .ev-i { display: none; } }

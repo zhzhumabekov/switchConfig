@@ -545,7 +545,8 @@ function render(cfg, sw = null) {
   renderServices(cfg);
   renderIssues(cfg);
   renderRaw(cfg);
-  showTab(state.tab === 'all' ? 'overview' : state.tab);
+  renderHistory(sw);
+  showTab(state.tab === 'all' || (state.tab === 'history' && !sw) ? 'overview' : state.tab);
 }
 
 function ago(iso) {
@@ -719,6 +720,12 @@ function renderProfiles(cfg) {
 
 /* ---------- таблица портов ---------- */
 function fillPortFilters(cfg) {
+  const keep = ['#portMember', '#portRole', '#portVlan', '#portLive'].map(id => [id, $(id).value]);
+  fillPortFilterOptions(cfg);
+  for (const [id, v] of keep) if ([...$(id).options].some(o => o.value === v)) $(id).value = v;
+}
+
+function fillPortFilterOptions(cfg) {
   $('#portMember').innerHTML = '<option value="">Все члены стека</option>' + cfg.members.map(s => `<option value="${s}">Slot ${s}</option>`).join('');
   $('#portRole').innerHTML = '<option value="">Все роли</option>' + ROLE_ORDER.filter(r => cfg.ports.some(p => p.role === r)).map(r => `<option value="${r}">${ROLES[r].label}</option>`).join('');
   $('#portVlan').innerHTML = '<option value="">Любой VLAN</option>' + cfg.usedVlans.map(v => `<option value="${v}">${v}${cfg.vlanNames[v] ? ' · ' + esc(cfg.vlanNames[v]) : ''}</option>`).join('');
@@ -927,6 +934,7 @@ function renderRaw(cfg) {
    Детали порта (боковая панель)
    ===================================================================== */
 function openPort(name) {
+  if (!CFG) return;
   const p = CFG.ports.find(x => x.name === name);
   if (!p) return;
   const prof = CFG.profiles.find(g => g.ports.includes(p));
@@ -945,6 +953,7 @@ function openPort(name) {
       <dt>Опции</dt><dd>${portFlags(p) || '—'}</dd>
     </dl>
     ${CFG.state ? livePortHtml(p) : ''}
+    ${SERVER && state.current && state.current !== 'all' ? portHistoryHtml(state.current, p.name) : ''}
     ${issues.length ? `<div class="sub">Замечания</div>${issues.map(i => `<div class="issue sev-${i.sev}" style="padding:8px 12px"><div class="it">${esc(i.title)}</div></div>`).join('')}` : ''}
     <div class="sub">Конфигурация</div>
     <pre>interface ${esc(p.name)}${p.lines.length ? '\n' + esc(p.lines.map(l => ' ' + l).join('\n')) : '\n <span class="muted"># нет настроек</span>'}</pre>
@@ -1008,6 +1017,9 @@ function toast(msg, kind = '') {
 async function loadSwitches() {
   const list = await apiCall('GET', 'api/switches');
   try { DIR = buildDirectory(await apiCall('GET', 'api/directory')); } catch (e) { DIR = null; }
+  try { EVENTS = await apiCall('GET', 'api/events?limit=300'); } catch (e) { EVENTS = []; }
+  try { DEVICES = await apiCall('GET', 'api/devices'); } catch (e) { DEVICES = null; }
+  pollSig = sigOf(list);
   const old = new Map(SWITCHES.map(s => [s.id, s]));
   SWITCHES = await Promise.all(list.map(async s => {
     if (!s.hasConfig) return { ...s, cfg: null };
@@ -1112,6 +1124,12 @@ function renderAll() {
     </div>`;
   }).join('');
 
+  // Последние события
+  const evShown = EVENTS.slice(0, 30);
+  $('#allEventsCard').hidden = !EVENTS.length;
+  $('#allEventsNote').textContent = EVENTS.length > 30 ? 'показаны последние 30' : '';
+  $('#allEvents').innerHTML = eventsHtml(evShown, true);
+
   // Неизвестные устройства на всех коммутаторах
   const unk = unknownDevices(liveSources());
   $('#allUnknownCard').hidden = !liveSources().length;
@@ -1188,6 +1206,7 @@ function findDevice(q) {
     }
   }
   if (isMac) {
+    if (DEVICES) for (const mac of Object.keys(DEVICES.macs)) if (macHex(mac).includes(hex)) macs.add(mac);
     for (const { cfg } of sources) {
       for (const m of cfg.state.mac) if (macHex(m.mac).includes(hex)) macs.add(m.mac);
       for (const a of cfg.state.arp) if (macHex(a.mac).includes(hex)) macs.add(a.mac);
@@ -1240,7 +1259,7 @@ function showFind(q) {
     html = r.devices.map(d => `<div class="find-item">
       <div class="h">${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
       ${d.info.os || d.info.ou || d.info.description ? `<div class="muted" style="font-size:12.5px">${esc([d.info.os, d.info.ou, d.info.description].filter(Boolean).join(' · '))}</div>` : ''}
-      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).'}</div>`}
+      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).' + lastSeenText(d.mac)}</div>`}
       ${d.seen.filter(s => s !== d.best).length ? `<details><summary class="muted">Также виден через ${d.seen.filter(s => s !== d.best).length}</summary>
         ${d.seen.filter(s => s !== d.best).map(s => `<div class="muted" style="font-size:12.5px">${loc(s)}${s.p ? ' · ' + esc(ROLES[s.p.role].label.toLowerCase()) : ''}</div>`).join('')}</details>` : ''}
     </div>`).join('');
@@ -1257,6 +1276,154 @@ function showFind(q) {
   $('#drawer').classList.add('open');
   $('#drawer').setAttribute('aria-hidden', 'false');
   $('#scrim').hidden = false;
+}
+
+/* ---------- история, события, устройства ---------- */
+let EVENTS = [];
+let DEVICES = null;
+let HIST = null; // { sw, versions, events, cache }
+let pollSig = '';
+
+const EV_ICON = {
+  unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️',
+};
+const EV_GROUPS = {
+  important: e => e.sev === 'high' || e.sev === 'med',
+  devices: e => ['new-device', 'unknown-device', 'moved'].includes(e.type),
+  ports: e => ['loop', 'loop-cleared', 'uplink-down', 'uplink-up', 'errors'].includes(e.type),
+  config: e => e.type === 'config-changed',
+  reach: e => ['unreachable', 'recovered'].includes(e.type),
+};
+
+function fmtTime(iso) {
+  return new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function eventsHtml(list, withSwitch) {
+  if (!list.length) return '<p class="muted" style="margin:0">Событий пока нет. Они появляются, когда при очередном сборе что-то меняется: порт упал, появилось новое устройство, изменился конфиг.</p>';
+  return `<ul class="events">${list.map(e => `<li class="ev sev-${esc(e.sev)}">
+    <span class="ev-t" title="${esc(new Date(e.ts).toLocaleString('ru-RU'))}">${esc(fmtTime(e.ts))}</span>
+    <span class="ev-i">${EV_ICON[e.type] || '•'}</span>
+    <span class="ev-x">${withSwitch ? `<b>${esc(e.swName || e.sw)}</b> · ` : ''}${esc(e.text)}${e.port ? ` <button class="plink" data-goto-sw="${esc(e.sw)}" data-goto-port="${esc(e.port)}">открыть порт</button>` : ''}${e.type === 'config-changed' ? ` <button class="plink" data-open-sw="${esc(e.sw)}" data-open-tab="history">что изменилось</button>` : ''}</span>
+  </li>`).join('')}</ul>`;
+}
+
+function lastSeenText(mac) {
+  const d = DEVICES && DEVICES.macs[mac];
+  if (!d) return '';
+  return ` Последний раз: ${d.swName || d.sw} · ${shortName(d.port)} · ${fmtTime(d.lastSeen)}.`;
+}
+
+// Какие устройства были на порту (по истории сборов)
+function portHistoryHtml(swId, portName) {
+  if (!DEVICES) return '';
+  const rows = [];
+  for (const [mac, d] of Object.entries(DEVICES.macs)) {
+    if (d.sw === swId && d.port === portName) rows.push({ mac, from: d.since || d.firstSeen, to: d.lastSeen, current: true });
+    for (const mv of d.moves || []) if (mv.sw === swId && mv.port === portName) rows.push({ mac, from: mv.from, to: mv.to });
+  }
+  if (!rows.length) return '';
+  rows.sort((a, b) => String(b.to).localeCompare(String(a.to)));
+  return `<div class="sub">История порта</div>
+    <table class="tbl static"><thead><tr><th>Устройство</th><th>Был на порту</th></tr></thead><tbody>
+    ${rows.slice(0, 20).map(r => {
+      const info = deviceInfo(r.mac);
+      return `<tr><td>${info.name ? deviceLabel(info, false) + ` <span class="mono muted">${esc(r.mac)}</span>` : `<span class="mono">${esc(r.mac)}</span>`}</td>
+        <td>${esc(fmtTime(r.from))} — ${r.current ? `последний раз ${esc(fmtTime(r.to))}` : `${esc(fmtTime(r.to))} <span class="muted">(переехал)</span>`}</td></tr>`;
+    }).join('')}
+    </tbody></table>`;
+}
+
+async function renderHistory(sw) {
+  $('#historyTabBtn').hidden = !SERVER || !sw;
+  if (!SERVER || !sw) return;
+  const id = sw.id;
+  let versions = [], events = [];
+  try { versions = await apiCall('GET', `api/switches/${encodeURIComponent(id)}/history`); } catch (e) { /* нет истории */ }
+  try { events = await apiCall('GET', `api/events?sw=${encodeURIComponent(id)}&limit=500`); } catch (e) { /* нет событий */ }
+  if (state.current !== id) return; // пока грузилось, выбрали другой коммутатор
+  const keepA = HIST && HIST.sw === id ? $('#verA').value : '', keepB = HIST && HIST.sw === id ? $('#verB').value : '';
+  HIST = { sw: id, versions, events, cache: HIST && HIST.sw === id ? HIST.cache : {} };
+  renderSwEvents();
+
+  const label = v => `${fmtTime(v.ts)}${v.added != null ? ` · +${v.added} / −${v.removed}` : ' · первая'}`;
+  const opts = versions.map(v => `<option value="${esc(v.ts)}">${esc(label(v))}</option>`).join('');
+  $('#verA').innerHTML = opts; $('#verB').innerHTML = opts;
+  const hasTwo = versions.length >= 2;
+  $('#verA').disabled = $('#verB').disabled = !hasTwo;
+  if (!versions.length) {
+    $('#verList').innerHTML = '<p class="muted" style="margin:0">История версий появится после следующего сбора конфигурации.</p>';
+    $('#cfgDiff').innerHTML = '';
+    return;
+  }
+  if (!hasTwo) {
+    $('#verList').innerHTML = `<p class="muted" style="margin:0">Пока одна версия — от ${esc(fmtTime(versions[0].ts))}. Различия появятся, когда конфигурация изменится.</p>`;
+    $('#cfgDiff').innerHTML = '';
+    return;
+  }
+  $('#verA').value = versions.some(v => v.ts === keepA) ? keepA : versions[1].ts;
+  $('#verB').value = versions.some(v => v.ts === keepB) ? keepB : versions[0].ts;
+  $('#verList').innerHTML = `<details class="ver-list"><summary class="muted">Все версии (${versions.length})</summary>
+    <table class="tbl static"><thead><tr><th>Дата</th><th>Строк</th><th>Изменения</th><th></th></tr></thead><tbody>
+    ${versions.slice(0, 50).map((v, i) => `<tr><td>${esc(new Date(v.ts).toLocaleString('ru-RU'))}</td><td>${v.lines}</td>
+      <td>${v.added != null ? `<span class="d-add">+${v.added}</span> <span class="d-del">−${v.removed}</span>` : '<span class="muted">первая версия</span>'}</td>
+      <td>${versions[i + 1] ? `<button class="plink" data-ver-a="${esc(versions[i + 1].ts)}" data-ver-b="${esc(v.ts)}">сравнить с предыдущей</button>` : ''}</td></tr>`).join('')}
+    </tbody></table></details>`;
+  showDiff();
+}
+
+function renderSwEvents() {
+  if (!HIST) return;
+  const f = EV_GROUPS[$('#evFilter').value];
+  $('#swEvents').innerHTML = eventsHtml(f ? HIST.events.filter(f) : HIST.events, false);
+}
+
+async function versionText(ts) {
+  if (!HIST.cache[ts]) HIST.cache[ts] = await apiCall('GET', `api/switches/${encodeURIComponent(HIST.sw)}/history/${encodeURIComponent(ts)}`);
+  return HIST.cache[ts];
+}
+
+async function showDiff() {
+  if (!HIST || HIST.versions.length < 2) return;
+  const a = $('#verA').value, b = $('#verB').value;
+  const box = $('#cfgDiff');
+  if (a === b) { box.innerHTML = '<p class="muted">Выберите две разные версии.</p>'; return; }
+  box.innerHTML = '<p class="muted">Сравниваю…</p>';
+  let ta, tb;
+  try { [ta, tb] = await Promise.all([versionText(a), versionText(b)]); }
+  catch (e) { box.innerHTML = `<p class="muted">Не удалось загрузить версию: ${esc(e.message)}</p>`; return; }
+  const [older, newer] = a < b ? [ta, tb] : [tb, ta];
+  const ops = LineDiff.diffLines(older.replace(/\n$/, '').split('\n'), newer.replace(/\n$/, '').split('\n'));
+  const st = LineDiff.stats(ops);
+  if (!st.added && !st.removed) { box.innerHTML = '<p class="muted">Версии одинаковые.</p>'; return; }
+  const line = l => `<div class="dl dl-${l.op === '+' ? 'add' : l.op === '-' ? 'del' : 'ctx'}"><span class="ln">${l.aNo ?? ''}</span><span class="ln">${l.bNo ?? ''}</span><span class="dt">${l.op === ' ' ? ' ' : l.op} ${esc(l.line)}</span></div>`;
+  // Ближайшая команда верхнего уровня над изменением (например, interface GigabitEthernet0/0/5)
+  const ctxOf = i => { for (let j = i; j >= 0; j--) { const t = ops[j].line; if (t && !/^\s/.test(t) && t !== '#') return t; } return ''; };
+  let body;
+  if ($('#diffFull').checked) {
+    let an = 0, bn = 0;
+    body = ops.map(o => { if (o.op !== '+') an++; if (o.op !== '-') bn++; return line({ ...o, aNo: o.op === '+' ? null : an, bNo: o.op === '-' ? null : bn }); }).join('');
+  } else {
+    body = LineDiff.hunks(ops).map(h => `<div class="hunk-h">${esc(ctxOf(h.lines.find(l => l.op !== ' ').i) || 'начало')}</div>${h.lines.map(line).join('')}`).join('');
+  }
+  box.innerHTML = `<div class="diff-sum"><span class="d-add">+${st.added}</span> <span class="d-del">−${st.removed}</span> строк</div><div class="diff">${body}</div>`;
+}
+
+// Фоновое обновление: сервер собирает данные по расписанию, страница подхватывает их сама
+function sigOf(list) { return list.map(x => [x.id, x.lastFetch, x.stateAt, x.lastError && x.lastError.at].join('|')).join(';'); }
+async function poll() {
+  if (document.hidden) return;
+  try {
+    const list = await apiCall('GET', 'api/switches');
+    const sig = sigOf(list);
+    if (pollSig && sig !== pollSig && !$('#refreshBtn').disabled) {
+      await loadSwitches();
+      selectSwitch(state.current);
+      toast('Данные обновлены');
+    }
+    pollSig = sig;
+  } catch (e) { /* сервер недоступен — попробуем позже */ }
 }
 
 function setHash() {
@@ -1292,6 +1459,8 @@ function bind() {
       openPort(gt.dataset.gotoPort);
       return;
     }
+    const vb = e.target.closest('[data-ver-a]');
+    if (vb) { $('#verA').value = vb.dataset.verA; $('#verB').value = vb.dataset.verB; showDiff(); $('#cfgDiff').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
     const rs = e.target.closest('[data-refresh-sw]');
     if (rs) { refresh(rs.dataset.refreshSw); return; }
     const pl = e.target.closest('[data-port]');
@@ -1324,6 +1493,8 @@ function bind() {
   });
 
   $('#swSelect').addEventListener('change', e => { selectSwitch(e.target.value); window.scrollTo(0, 0); });
+  $('#evFilter').addEventListener('change', renderSwEvents);
+  ['#verA', '#verB', '#diffFull'].forEach(id => $(id).addEventListener('change', showDiff));
   $('#refreshBtn').addEventListener('click', () => refresh(state.current));
   $('#findInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); showFind(e.target.value); } });
 
@@ -1399,6 +1570,7 @@ async function boot() {
 
   SERVER = true;
   ['#swSelect', '#refreshBtn', '#settingsLink', '#findInput'].forEach(s => { $(s).hidden = false; });
+  setInterval(poll, 60000);
   $('#fileBtn').hidden = true;
 
   let [id, tab] = hash.split('/');

@@ -75,6 +75,35 @@
     </div>
   </div>
 
+  <div class="card" id="schedCard" hidden>
+    <div class="card-head">
+      <h2>Сбор по расписанию</h2>
+      <span class="form-status" id="schedInfo"></span>
+    </div>
+    <p class="hint">Пока запущен сервер (<code>start.bat</code>), данные собираются сами. По ним ведётся история: версии конфигурации, события (упал аплинк, петля, новое устройство), где и когда было видно каждое устройство.</p>
+    <form id="schedForm">
+      <label class="chk" style="margin-bottom:10px"><input type="checkbox" name="enabled"> <b style="color:var(--text)">Собирать автоматически</b></label>
+      <div class="form-grid">
+        <label class="field">Состояние портов, каждые (мин)
+          <input name="stateMinutes" type="number" min="5" max="1440">
+          <small class="muted">Порты, MAC, LLDP, ARP. От 5 до 1440</small>
+        </label>
+        <label class="field">Конфигурация, каждые (ч)
+          <input name="configHours" type="number" min="1" max="168">
+          <small class="muted">От 1 до 168</small>
+        </label>
+        <label class="field">AD / DHCP / DNS, каждые (мин)
+          <input name="directoryMinutes" type="number" min="10" max="1440">
+          <small class="muted">От 10 до 1440</small>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn primary">Сохранить</button>
+        <span class="form-status" id="schedStatus"></span>
+      </div>
+    </form>
+  </div>
+
   <div class="card" id="dirCard" hidden>
     <div class="card-head">
       <h2>Windows-серверы: AD, DHCP, DNS</h2>

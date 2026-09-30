@@ -295,6 +295,47 @@ $('#dirRefresh').addEventListener('click', async () => {
   btn.disabled = false;
 });
 
+/* ---------- расписание ---------- */
+function fillSched(s) {
+  const f = $('#schedForm').elements;
+  f.enabled.checked = s.enabled;
+  f.stateMinutes.value = s.stateMinutes;
+  f.configHours.value = s.configHours;
+  f.directoryMinutes.value = s.directoryMinutes;
+  const parts = [];
+  if (!s.enabled) parts.push('выключено');
+  else if (s.running) parts.push('идёт сбор…');
+  else if (s.next) parts.push(`следующий сбор ${new Date(s.next) - Date.now() < 60000 ? 'в ближайшую минуту' : 'в ' + new Date(s.next).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`);
+  else parts.push('нет коммутаторов с сохранённым паролем');
+  if (s.lastRun) {
+    const r = Object.values(s.lastRun.results || {});
+    parts.push(`последний: ${ago(s.lastRun.at)}, успешно ${r.filter(x => x.ok).length} из ${r.length}`);
+  }
+  $('#schedInfo').textContent = parts.join(' · ');
+}
+
+async function loadSched() {
+  try { fillSched(await api('GET', 'api/schedule')); $('#schedCard').hidden = false; }
+  catch (e) { /* сервер старой версии */ }
+}
+
+$('#schedForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = $('#schedForm').elements;
+  try {
+    fillSched(await api('PUT', 'api/schedule', {
+      enabled: f.enabled.checked, stateMinutes: +f.stateMinutes.value, configHours: +f.configHours.value, directoryMinutes: +f.directoryMinutes.value,
+    }));
+    $('#schedStatus').textContent = 'Сохранено';
+    $('#schedStatus').className = 'form-status ok';
+  } catch (err) {
+    $('#schedStatus').textContent = err.message;
+    $('#schedStatus').className = 'form-status err';
+  }
+});
+
 load();
+loadSched();
 loadDir();
+setInterval(loadSched, 30000);
 })();
