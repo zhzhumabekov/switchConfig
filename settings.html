@@ -32,6 +32,12 @@
     <div class="card-head"><h2 id="formTitle">Новый коммутатор</h2></div>
     <form id="swForm" autocomplete="off">
       <div class="form-grid">
+        <label class="field">Тип устройства
+          <select name="type">
+            <option value="huawei">Коммутатор Huawei</option>
+            <option value="cisco-cme">Cisco CME (телефония)</option>
+          </select>
+        </label>
         <label class="field">Название
           <input name="name" required placeholder="Например, 3 этаж">
         </label>
@@ -51,6 +57,10 @@
           </span>
           <small class="muted" id="pwHint"></small>
         </label>
+        <label class="field" id="enableField" hidden>Пароль enable
+          <input name="enablePassword" type="password" autocomplete="new-password">
+          <small class="muted" id="enableHint">Если после входа нужен режим enable</small>
+        </label>
       </div>
       <label class="chk" id="clearPwRow" hidden><input type="checkbox" name="clearPassword"> удалить сохранённый пароль</label>
       <div class="form-actions">
@@ -66,7 +76,7 @@
   <div class="card" id="listCard">
     <div class="table-scroll">
       <table class="tbl static" id="swTable">
-        <thead><tr><th>Название</th><th>Адрес</th><th>Логин</th><th>Пароль</th><th>Конфигурация</th><th></th></tr></thead>
+        <thead><tr><th>Название</th><th>Адрес</th><th>Логин</th><th>Пароль</th><th>Данные</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

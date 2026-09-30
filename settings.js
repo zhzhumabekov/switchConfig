@@ -58,10 +58,11 @@ function renderList() {
     let cfg;
     if (s.busy) cfg = '<span class="flag">забирается…</span>';
     else if (s.lastError) cfg = `<span class="flag warn" title="${esc(ago(s.lastError.at))}">Ошибка</span> <span class="muted">${esc(s.lastError.message)}</span>`;
+    else if (s.type === 'cisco-cme' && s.stateAt) cfg = `<span class="flag">телефоны загружены</span> <span class="muted">${esc(ago(s.stateAt))}</span>`;
     else if (s.hasConfig) cfg = `<span class="flag">загружена</span> <span class="muted">${esc(ago(s.lastFetch))}${s.source && !s.hasPassword ? ' · ' + esc(s.source) : ''}</span>`;
     else cfg = '<span class="muted">ещё не загружена</span>';
     return `<tr data-id="${esc(s.id)}">
-      <td><b>${esc(s.name)}</b>${s.sysname && s.sysname !== s.name ? `<div class="muted mono">${esc(s.sysname)}</div>` : ''}</td>
+      <td><b>${esc(s.name)}</b>${s.type === 'cisco-cme' ? ' <span class="flag">Cisco CME</span>' : ''}${s.sysname && s.sysname !== s.name ? `<div class="muted mono">${esc(s.sysname)}</div>` : ''}</td>
       <td class="mono">${esc(s.host)}${s.port !== 22 ? ':' + s.port : ''}</td>
       <td class="mono">${esc(s.user)}</td>
       <td>${s.hasPassword ? '<span class="flag">сохранён</span>' : '<span class="flag warn">не задан</span>'}</td>
@@ -82,6 +83,11 @@ function openForm(id) {
   const s = list.find(x => x.id === id);
   const f = $('#swForm');
   f.reset();
+  f.elements.type.value = s ? (s.type || 'huawei') : 'huawei';
+  f.elements.enablePassword.value = '';
+  f.elements.enablePassword.placeholder = s && s.hasEnable ? '•••••••• (сохранён)' : '';
+  $('#enableHint').textContent = s && s.hasEnable ? 'Оставьте пустым, чтобы не менять' : 'Если после входа нужен режим enable';
+  toggleType();
   f.elements.name.value = s ? s.name : '';
   f.elements.host.value = s ? s.host : '';
   f.elements.port.value = s ? s.port : 22;
@@ -104,6 +110,7 @@ function formData() {
   return {
     name: f.elements.name.value.trim(), host: f.elements.host.value.trim(), port: +f.elements.port.value || 22,
     user: f.elements.user.value.trim(), password: f.elements.password.value, clearPassword: f.elements.clearPassword.checked,
+    type: f.elements.type.value, enablePassword: f.elements.enablePassword.value,
   };
 }
 
@@ -116,8 +123,9 @@ async function saveForm() {
   const d = formData();
   if (!d.name || !d.host || !d.user) { status('Заполните название, адрес и логин', 'err'); return null; }
   if (!editing && !d.password) { status('Укажите пароль', 'err'); return null; }
-  const body = { name: d.name, host: d.host, port: d.port, user: d.user };
+  const body = { name: d.name, host: d.host, port: d.port, user: d.user, type: d.type };
   if (d.password) body.password = d.password;
+  if (d.enablePassword) body.enablePassword = d.enablePassword;
   if (d.clearPassword) body.clearPassword = true;
   status('Сохраняю…');
   try {
@@ -138,7 +146,7 @@ async function fetchOne(id) {
   renderList();
   try {
     const r = await api('POST', `api/switches/${encodeURIComponent(id)}/fetch`, {});
-    toast(r.ok ? `${s.name}: получено ${r.lines} строк${r.changed ? '' : ' (без изменений)'}` : `${s.name}: ${r.error}`, r.ok ? 'ok' : 'err');
+    toast(r.ok ? (r.phones != null ? `${s.name}: телефонов ${r.phones}, зарегистрировано ${r.registered}` : `${s.name}: получено ${r.lines} строк${r.changed ? '' : ' (без изменений)'}`) : `${s.name}: ${r.error}`, r.ok ? 'ok' : 'err');
   } catch (e) { toast(e.message, 'err'); }
   list = await api('GET', 'api/switches');
   renderList();
@@ -153,6 +161,13 @@ async function testConn(body, report) {
 }
 
 /* ---------- события ---------- */
+function toggleType() {
+  const cme = $('#swForm').elements.type.value === 'cisco-cme';
+  $('#enableField').hidden = !cme;
+  $('#saveFetch').textContent = cme ? 'Сохранить и забрать данные о телефонах' : 'Сохранить и забрать конфигурацию';
+}
+$('#swForm').elements.type.addEventListener('change', toggleType);
+
 $('#addBtn').addEventListener('click', () => openForm(null));
 $('#cancelBtn').addEventListener('click', closeForm);
 $('#pwToggle').addEventListener('click', () => {
@@ -177,7 +192,7 @@ $('#testBtn').addEventListener('click', () => {
   const d = formData();
   if (!d.host || !d.user) { status('Укажите адрес и логин', 'err'); return; }
   if (!d.password && !(editing && list.find(x => x.id === editing)?.hasPassword)) { status('Укажите пароль', 'err'); return; }
-  const body = { host: d.host, port: d.port, user: d.user };
+  const body = { host: d.host, port: d.port, user: d.user, type: d.type };
   if (d.password) body.password = d.password;
   if (editing) body.id = editing;
   testConn(body, status);

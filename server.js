@@ -48,7 +48,7 @@ function readBody(req) {
 // Открытый вид записи: без пароля
 function publicView(s) {
   return {
-    id: s.id, name: s.name, host: s.host, port: s.port, user: s.user,
+    id: s.id, name: s.name, host: s.host, port: s.port, user: s.user, type: s.type || 'huawei', hasEnable: !!s.enableSecret,
     hasPassword: !!s.secret, sysname: s.sysname || '', lastFetch: s.lastFetch || null,
     lastError: s.lastError || null, lastChange: s.lastChange || null, source: s.source || '',
     hasConfig: !!store.readConfig(s.id), stateAt: s.stateAt || null, busy: collector.busy.has(s.id),
@@ -73,6 +73,9 @@ function validate(b, partial) {
     out.user = String(b.user || '').trim();
     if (!out.user) throw new HttpError(400, 'Укажите логин');
   }
+  if (!partial || b.type !== undefined) {
+    out.type = b.type === 'cisco-cme' ? 'cisco-cme' : 'huawei';
+  }
   return out;
 }
 
@@ -88,6 +91,7 @@ async function api(req, res, parts) {
     const v = validate(b);
     const list = store.load();
     const sw = { id: store.makeId(v.name, list), ...v, secret: b.password ? await store.encrypt(String(b.password)) : null, createdAt: new Date().toISOString() };
+    if (b.enablePassword) sw.enableSecret = await store.encrypt(String(b.enablePassword));
     list.push(sw);
     store.save(list);
     return send(res, 201, publicView(sw));
@@ -103,6 +107,8 @@ async function api(req, res, parts) {
       Object.assign(sw, v);
       if (b.password) sw.secret = await store.encrypt(String(b.password));
       if (b.clearPassword) sw.secret = null;
+      if (b.enablePassword) sw.enableSecret = await store.encrypt(String(b.enablePassword));
+      if (b.clearEnable) sw.enableSecret = null;
       store.save(list);
       return send(res, 200, publicView(sw));
     }
@@ -205,10 +211,10 @@ async function api(req, res, parts) {
     const b = await readBody(req);
     const list = store.load();
     const sw = b.id ? list.find(s => s.id === b.id) : null;
-    const v = validate({ name: 'test', host: b.host ?? sw?.host, port: b.port ?? sw?.port, user: b.user ?? sw?.user });
+    const v = validate({ name: 'test', host: b.host ?? sw?.host, port: b.port ?? sw?.port, user: b.user ?? sw?.user, type: b.type ?? sw?.type });
     try {
       const password = await collector.passwordFor(sw, b.password);
-      const prompt = await fetchConfig({ host: v.host, port: v.port, user: v.user, testOnly: true, timeout: 25 }, password);
+      const prompt = await fetchConfig({ host: v.host, port: v.port, user: v.user, testOnly: true, timeout: 25, vendor: v.type === 'cisco-cme' ? 'cisco' : 'huawei' }, password);
       return send(res, 200, { ok: true, prompt });
     } catch (err) {
       return send(res, 200, { ok: false, error: err.user ? err.message : humanError(err) });

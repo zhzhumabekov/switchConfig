@@ -294,6 +294,7 @@ a.btn { text-decoration: none; }
   border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; width: 100%;
 }
 .field input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.field select { font: inherit; font-size: 14px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; width: 100%; }
 .field small { font-size: 11.5px; }
 .pw { display: flex; gap: 6px; }
 .pw input { flex: 1; min-width: 0; }

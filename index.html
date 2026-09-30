@@ -54,6 +54,22 @@
       <div id="allEvents"></div>
     </div>
     <div class="sw-grid" id="swGrid"></div>
+    <div class="card" id="phonesCard" hidden>
+      <div class="card-head">
+        <h2>Телефония (Cisco CME)</h2>
+        <div class="controls">
+          <input type="search" id="phoneSearch" placeholder="Номер, имя, MAC, IP…">
+          <select id="phoneFilter">
+            <option value="">Все телефоны</option>
+            <option value="unreg">Не зарегистрированы</option>
+            <option value="nowhere">Не найдены на коммутаторах</option>
+          </select>
+        </div>
+      </div>
+      <div id="cmeSources" class="muted" style="font-size:12.5px;margin-bottom:8px"></div>
+      <div class="table-scroll"><table class="tbl" id="phoneTable"></table></div>
+      <div class="foot" id="phoneFoot"></div>
+    </div>
     <div class="card" id="mapCard" hidden>
       <div class="card-head">
         <h2>Схема сети</h2>

@@ -38,7 +38,7 @@ function due(s = load()) {
   const out = {};
   for (const sw of store.load()) {
     if (!sw.secret || collector.busy.has(sw.id)) continue;
-    const needConfig = age(sw.lastFetch) >= s.configHours * 3600e3;
+    const needConfig = sw.type !== 'cisco-cme' && age(sw.lastFetch) >= s.configHours * 3600e3;
     // После ошибки ждём тот же интервал, а не пробуем каждую минуту
     const needState = age(sw.lastAttempt || sw.stateAt) >= s.stateMinutes * 60e3;
     if (needState || (needConfig && age(sw.lastAttempt) >= s.stateMinutes * 60e3)) out[sw.id] = { config: needConfig, reason: 'schedule' };

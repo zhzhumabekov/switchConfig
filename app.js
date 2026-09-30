@@ -454,14 +454,22 @@ function deviceInfo(mac) {
     if (ip) { name = shortHost(DIR.dns[ip]); source = 'dns'; }
   }
   const ad = name && DIR ? DIR.adByName.get(name.toUpperCase()) : null;
+  const phone = PHONES ? PHONES.get(mac) : null;
+  if (phone && phone.ip && !ips.includes(phone.ip)) ips.push(phone.ip);
   return {
-    mac, ips, name, source, lease, ad,
+    mac, ips, name, source, lease, ad, phone,
     os: ad ? ad.os : '', ou: ad ? ouPath(ad.dn) : '', description: (ad && ad.description) || (lease && lease.description) || '',
-    known: !!(lease || ad || source === 'dns'),
+    known: !!(lease || ad || phone || source === 'dns'),
   };
 }
 
+function phoneLabel(ph) {
+  const t = [ph.model && 'CP-' + ph.model.replace(/^CP-/i, ''), ph.description, ph.status !== 'registered' ? 'не зарегистрирован' : ''].filter(Boolean).join(' · ');
+  return `<span class="dev" title="${esc(t)}">☎ <b>${esc(ph.numbers.join(', ') || '—')}</b>${ph.names[0] ? ' ' + esc(ph.names[0]) : ''}</span>${ph.status !== 'registered' ? ' <span class="flag warn">не зарег.</span>' : ''}`;
+}
+
 function deviceLabel(d, withIp = true) {
+  if (d.phone && !d.name) return phoneLabel(d.phone) + (withIp && d.ips.length ? ` <span class="mono muted">${esc(d.ips[0])}</span>` : '');
   if (!d.name) return withIp && d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : '';
   const title = [d.os, d.ou, d.description].filter(Boolean).join(' · ');
   const off = d.ad && !d.ad.enabled ? ' <span class="flag warn" title="Учётная запись компьютера отключена в AD">откл. в AD</span>' : '';
@@ -987,8 +995,8 @@ function livePortHtml(p) {
     </dl>` : '<div class="muted">Порт не найден в выводе display interface brief.</div>'}
     ${p.lldp.length ? `<div class="sub">LLDP-сосед</div><ul class="list">${p.lldp.map(n => `<li><span class="grow"><b>${esc(n.device || '?')}</b></span><span class="muted">порт</span> <span class="mono">${esc(n.remotePort || '—')}</span></li>`).join('')}</ul>` : ''}
     <div class="sub">MAC-адреса на порту (${macs.length})</div>
-    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP</th>${DIR ? '<th>Устройство</th>' : ''}</tr></thead><tbody>
-      ${macs.slice(0, MAX).map(m => { const d = deviceInfo(m.mac); return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${DIR ? `<td>${d.name ? deviceLabel(d, false) + (d.os || d.ou ? `<div class="muted" style="font-size:12px">${esc([d.os, d.ou].filter(Boolean).join(' · '))}</div>` : '') + (d.description ? `<div class="muted" style="font-size:12px">${esc(d.description)}</div>` : '') : '<span class="flag warn">неизвестно</span>'}</td>` : ''}</tr>`; }).join('')}
+    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP</th>${DIR || (PHONES && PHONES.size) ? '<th>Устройство</th>' : ''}</tr></thead><tbody>
+      ${macs.slice(0, MAX).map(m => { const d = deviceInfo(m.mac); return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${DIR || (PHONES && PHONES.size) ? `<td>${d.name || d.phone ? deviceLabel(d, false) + (d.os || d.ou ? `<div class="muted" style="font-size:12px">${esc([d.os, d.ou].filter(Boolean).join(' · '))}</div>` : '') + (d.description ? `<div class="muted" style="font-size:12px">${esc(d.description)}</div>` : '') : '<span class="flag warn">неизвестно</span>'}</td>` : ''}</tr>`; }).join('')}
     </tbody></table>${macs.length > MAX ? `<div class="muted" style="margin-top:6px">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`
     : '<div class="muted">Нет выученных MAC-адресов.</div>'}`;
 }
@@ -1084,12 +1092,20 @@ function toast(msg, kind = '') {
 }
 
 async function loadSwitches() {
-  const list = await apiCall('GET', 'api/switches');
+  const all = await apiCall('GET', 'api/switches');
+  const list = all.filter(x => x.type !== 'cisco-cme');
+  CMES = await Promise.all(all.filter(x => x.type === 'cisco-cme').map(async x => {
+    let st = null;
+    if (x.stateAt) { try { st = await apiCall('GET', `api/switches/${encodeURIComponent(x.id)}/state`); } catch (e) { /* нет данных */ } }
+    return { ...x, phones: (st && st.phones) || [], cmeErrors: (st && st.errors) || {}, cmeAt: st && st.at };
+  }));
+  PHONES = new Map();
+  for (const c of CMES) for (const p of c.phones) PHONES.set(p.mac, { ...p, cme: c });
   try { DIR = buildDirectory(await apiCall('GET', 'api/directory')); } catch (e) { DIR = null; }
   try { EVENTS = await apiCall('GET', 'api/events?limit=300'); } catch (e) { EVENTS = []; }
   try { DEVICES = await apiCall('GET', 'api/devices'); } catch (e) { DEVICES = null; }
   try { const st = await apiCall('GET', 'api/standard'); STD = st && st.ports ? st : null; } catch (e) { STD = null; }
-  pollSig = sigOf(list);
+  pollSig = sigOf(all);
   const old = new Map(SWITCHES.map(s => [s.id, s]));
   SWITCHES = await Promise.all(list.map(async s => {
     if (!s.hasConfig) return { ...s, cfg: null };
@@ -1194,6 +1210,9 @@ function renderAll() {
     </div>`;
   }).join('');
 
+  // Телефония
+  renderPhones();
+
   // Схема сети и оборудование
   renderMap(withCfg);
   renderHwTable(withCfg);
@@ -1274,7 +1293,15 @@ function findDevice(q) {
   if (isIp) {
     const full = /^\d+\.\d+\.\d+\.\d+$/.test(q);
     for (const { cfg } of sources) for (const a of cfg.state.arp) if (full ? a.ip === q : a.ip.startsWith(q)) macs.add(a.mac);
-  } else if (DIR && q.length >= 2) {
+  } else if (PHONES && PHONES.size && /^\d{2,}$/.test(q)) {
+    // Внутренний номер
+    for (const p of PHONES.values()) if (p.numbers.some(n => n === q || n.startsWith(q))) macs.add(p.mac);
+  }
+  if (!isIp && PHONES && q.length >= 2) {
+    const ql = q.toLowerCase();
+    for (const p of PHONES.values()) if (p.names.some(n => n.toLowerCase().includes(ql)) || (p.description || '').toLowerCase().includes(ql)) macs.add(p.mac);
+  }
+  if (!isIp && DIR && q.length >= 2 && !/^\d+$/.test(q)) {
     const ql = q.toLowerCase();
     for (const l of DIR.byMac.values()) if ((l.host || '').toLowerCase().includes(ql) || (l.description || '').toLowerCase().includes(ql)) macs.add(l.mac);
     for (const c of DIR.adByName.values()) {
@@ -1300,7 +1327,8 @@ function findDevice(q) {
       seen.push({ sw, cfg, p, m, transit, count: p ? p.macs.length : 999 });
     }
     seen.sort((a, b) => a.transit - b.transit || a.count - b.count);
-    return { mac, ips: ipsForMac(mac), info: deviceInfo(mac), best: seen[0] && !seen[0].transit ? seen[0] : null, seen };
+    const info = deviceInfo(mac);
+    return { mac, ips: info.ips, info, best: seen[0] && !seen[0].transit ? seen[0] : null, seen };
   });
 
   // Текстовый поиск: LLDP-соседи и описания портов
@@ -1334,7 +1362,7 @@ function showFind(q) {
     html = '<p class="muted">Нет данных о состоянии портов. Нажмите «Обновить», чтобы забрать их с коммутаторов.</p>';
   } else if (r.devices.length) {
     html = r.devices.map(d => `<div class="find-item">
-      <div class="h">${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
+      <div class="h">${d.info.phone ? phoneLabel(d.info.phone) : ''}${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
       ${d.info.os || d.info.ou || d.info.description ? `<div class="muted" style="font-size:12.5px">${esc([d.info.os, d.info.ou, d.info.description].filter(Boolean).join(' · '))}</div>` : ''}
       ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).' + lastSeenText(d.mac)}</div>`}
       ${d.seen.filter(s => s !== d.best).length ? `<details><summary class="muted">Также виден через ${d.seen.filter(s => s !== d.best).length}</summary>
@@ -1363,11 +1391,11 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
-  devices: e => ['new-device', 'unknown-device', 'moved'].includes(e.type),
+  devices: e => ['new-device', 'unknown-device', 'moved', 'phone-unreg', 'phone-reg'].includes(e.type),
   ports: e => ['loop', 'loop-cleared', 'uplink-down', 'uplink-up', 'errors'].includes(e.type),
   config: e => e.type === 'config-changed',
   reach: e => ['unreachable', 'recovered'].includes(e.type),
@@ -1502,6 +1530,66 @@ async function poll() {
     }
     pollSig = sig;
   } catch (e) { /* сервер недоступен — попробуем позже */ }
+}
+
+/* ---------- телефония: Cisco CME ---------- */
+let CMES = [];
+let PHONES = null; // MAC → телефон
+
+// Где подключён MAC сейчас: конечный порт (не аплинк)
+function locateMac(mac) {
+  const seen = [];
+  for (const { sw, cfg } of liveSources()) for (const m of cfg.state.mac) {
+    if (m.mac !== mac) continue;
+    const p = cfg.ports.find(x => x.name === m.port);
+    const transit = !p || ['uplink', 'link'].includes(p.role) || (p.lldp.length > 0 && p.macs.length > 3) || p.macs.length > 20;
+    seen.push({ sw, cfg, p, m, transit, count: p ? p.macs.length : 999 });
+  }
+  seen.sort((a, b) => a.transit - b.transit || a.count - b.count);
+  return seen[0] && !seen[0].transit ? seen[0] : null;
+}
+
+function renderPhones() {
+  $('#phonesCard').hidden = !CMES.length;
+  if (!CMES.length) return;
+  $('#cmeSources').innerHTML = CMES.map(c => `<b>${esc(c.name)}</b> ${esc(c.host)} · ${c.lastError ? `<span style="color:var(--sev-high)">ошибка: ${esc(c.lastError.message)}</span>` : c.cmeAt ? `обновлено ${esc(ago(c.cmeAt))}` : 'данные ещё не загружены'}
+    ${Object.keys(c.cmeErrors).length ? ` · не выполнились: ${esc(Object.keys(c.cmeErrors).join(', '))}` : ''}
+    ${c.hasPassword ? ` <button class="btn small" data-refresh-sw="${esc(c.id)}">Обновить</button>` : ' <a href="settings.html">указать пароль</a>'}`).join('<br>');
+  renderPhoneTable();
+}
+
+function renderPhoneTable() {
+  const q = $('#phoneSearch').value.trim().toLowerCase();
+  const f = $('#phoneFilter').value;
+  const rows = [];
+  for (const c of CMES) for (const ph of c.phones) {
+    const loc = locateMac(ph.mac);
+    const last = !loc && DEVICES && DEVICES.macs[ph.mac];
+    if (f === 'unreg' && ph.status === 'registered') continue;
+    if (f === 'nowhere' && loc) continue;
+    if (q) {
+      const hay = [ph.numbers.join(' '), ph.names.join(' '), ph.description, ph.mac, ph.mac.replace(/-/g, ''), ph.ip, ph.model, loc && loc.p.short, loc && loc.sw && loc.sw.name].join(' ').toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+    rows.push({ c, ph, loc, last });
+  }
+  rows.sort((a, b) => String(a.ph.numbers[0] || '~').localeCompare(String(b.ph.numbers[0] || '~'), 'ru', { numeric: true }));
+  const total = CMES.reduce((n, c) => n + c.phones.length, 0);
+  const reg = CMES.reduce((n, c) => n + c.phones.filter(p => p.status === 'registered').length, 0);
+  $('#phoneTable').innerHTML = `<thead><tr><th>Номер</th><th>Имя / подпись</th><th>Модель</th><th>Статус</th><th>IP</th><th>MAC</th><th>Подключён</th></tr></thead><tbody>` +
+    rows.slice(0, 500).map(({ ph, loc, last }) => `<tr ${loc ? `data-goto-sw="${esc(loc.sw ? loc.sw.id : '')}" data-goto-port="${esc(loc.p.name)}"` : ''}>
+      <td class="mono"><b>${esc(ph.numbers.join(', ') || '—')}</b></td>
+      <td>${esc(ph.names.join(' · ') || '—')}${ph.description ? `<div class="muted" style="font-size:12px">${esc(ph.description)}</div>` : ''}</td>
+      <td>${esc(ph.model || '—')} <span class="muted">${ph.proto.toUpperCase()}</span></td>
+      <td>${ph.status === 'registered' ? '<span class="live live-up">зарегистрирован</span>' : `<span class="flag warn">${esc(ph.status === 'unregistered' ? 'не зарегистрирован' : ph.status === 'deceased' ? 'пропал (deceased)' : 'неизвестно')}</span>`}</td>
+      <td class="mono">${esc(ph.ip || '—')}</td>
+      <td class="mono muted">${esc(ph.mac)}</td>
+      <td>${loc ? `<b>${esc(loc.sw ? loc.sw.name : '')}</b> · <span class="mono">${esc(loc.p.short)}</span>${loc.p.desc ? ` <span class="muted">${esc(loc.p.desc)}</span>` : ''}`
+        : last ? `<span class="muted">последний раз: ${esc(last.swName || last.sw)} · ${esc(shortName(last.port))} · ${esc(fmtTime(last.lastSeen))}</span>`
+        : '<span class="muted">не найден на коммутаторах</span>'}</td>
+    </tr>`).join('') + '</tbody>';
+  const found = rows.filter(r => r.loc).length;
+  $('#phoneFoot').textContent = `Всего ${total}, зарегистрировано ${reg}. Показано ${Math.min(rows.length, 500)}, из них найдено на портах ${found}.`;
 }
 
 /* ---------- оборудование и схема сети (этап 5) ---------- */
@@ -1949,6 +2037,8 @@ function bind() {
 
   $('#swSelect').addEventListener('change', e => { selectSwitch(e.target.value); window.scrollTo(0, 0); });
   $('#evFilter').addEventListener('change', renderSwEvents);
+  $('#phoneSearch').addEventListener('input', renderPhoneTable);
+  $('#phoneFilter').addEventListener('change', renderPhoneTable);
   ['#verA', '#verB', '#diffFull'].forEach(id => $(id).addEventListener('change', showDiff));
   $('#refreshBtn').addEventListener('click', () => refresh(state.current));
   $('#findInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); showFind(e.target.value); } });

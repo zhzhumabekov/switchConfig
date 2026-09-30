@@ -58,25 +58,36 @@ function askHidden(question) {
   });
 }
 
-// Убирает управляющие последовательности терминала и пагинацию «---- More ----»
+// Убирает управляющие последовательности терминала и пагинацию («---- More ----» Huawei, «--More--» Cisco)
 function clean(text) {
   return text
     .replace(/ *---- More ----/g, '')
-    .replace(/\x1b\[\d+D *\x1b\[\d+D/g, '')   // стирание строки «More» курсором
+    .replace(/\x1b\[\d+D *\x1b\[\d+D/g, '')   // стирание строки «More» курсором (Huawei)
+    .replace(/ ?--More-- ?/g, '')
+    .replace(/\x08+ *\x08+/g, '')              // стирание «--More--» возвратом каретки (Cisco)
+    .replace(/\x08/g, '')
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '')
     .replace(/\r+\n/g, '\n')
     .replace(/\r/g, '');
 }
 
-const PROMPT = /(?:^|\n)([<\[][^<>\[\]\r\n]{1,64}[>\]])\s*$/;
+// Особенности CLI разных производителей
+const VENDORS = {
+  huawei: { prompt: /(?:^|\n)([<\[][^<>\[\]\r\n]{1,64}[>\]])\s*$/, more: /---- More ----\s*$/, pager: 'screen-length 0 temporary', quit: 'quit', name: p => p.slice(1, -1) },
+  cisco: { prompt: /(?:^|\n)([A-Za-z0-9._\-()\/]{1,64}[#>])\s*$/, more: /--More--\s*$/, pager: 'terminal length 0', quit: 'exit', name: p => p.slice(0, -1) },
+};
+const PROMPT = VENDORS.huawei.prompt;
 
 // Выполняет команды в одной SSH-сессии и возвращает их вывод (по элементу на команду).
 // opt.testOnly — только войти и вернуть имя из приглашения (<SWITCH-NAME>), без команд.
+// opt.vendor — 'huawei' (по умолчанию) или 'cisco'; opt.enablePassword — пароль enable для Cisco.
 function runCommands(opt, password, commands) {
   const timeout = opt.timeout || 60;
+  const V = VENDORS[opt.vendor] || VENDORS.huawei;
   return new Promise((resolve, reject) => {
     const conn = new Client();
-    const queue = ['screen-length 0 temporary', ...commands];
+    const queue = [V.pager, ...commands];
+    let enabling = false;
     const outputs = [];
     let buf = '';
     let idx = -1;       // -1 — ждём приглашение после входа
@@ -99,15 +110,33 @@ function runCommands(opt, password, commands) {
         stream.on('data', d => {
           if (settled) return;
           buf += d.toString('utf8');
-          // Старые версии VRP игнорируют screen-length — отвечаем пробелом на пагинацию
-          if (/---- More ----\s*$/.test(buf)) { stream.write(' '); return; }
+          // Если пагинация не отключилась — отвечаем пробелом
+          if (V.more.test(buf)) { stream.write(' '); return; }
           if (/\[Y\/N\]:?\s*$/i.test(buf)) { stream.write('N\n'); return; }  // напр. «сменить пароль?»
 
+          // Cisco: переход в привилегированный режим (enable)
+          if (enabling) {
+            if (/Password:\s*$/i.test(buf)) { buf = ''; send(opt.enablePassword); return; }
+            if (/% ?(Access denied|Bad secrets|Error in authentication)/i.test(buf)) return finish(new Error('Неверный пароль enable'));
+            const m = clean(buf).match(V.prompt);
+            if (!m) return;
+            enabling = false;
+            if (!m[1].endsWith('#')) return finish(new Error('Не удалось войти в режим enable'));
+            prompt = m[1];
+            buf = '';
+            idx = 0;
+            send(queue[0]);
+            return;
+          }
+
           if (!prompt) {
-            const m = clean(buf).match(PROMPT);
+            const m = clean(buf).match(V.prompt);
             if (!m) return;
             prompt = m[1];
-            if (opt.testOnly) { send('quit'); return finish(null, prompt.slice(1, -1)); }
+            if (opt.testOnly) { send(V.quit); return finish(null, V.name(prompt)); }
+            if (opt.vendor === 'cisco' && prompt.endsWith('>') && opt.enablePassword) {
+              enabling = true; buf = ''; send('enable'); return;
+            }
           } else if (!clean(buf).replace(/\s+$/, '').endsWith(prompt)) {
             return; // команда ещё выводит данные
           } else if (idx >= 1) {
@@ -117,7 +146,7 @@ function runCommands(opt, password, commands) {
           idx++;
           buf = '';
           if (idx < queue.length) send(queue[idx]);
-          else { send('quit'); finish(null, outputs); }
+          else { send(V.quit); finish(null, outputs); }
         });
         stream.on('close', () => finish(new Error('Сессия закрылась до получения данных')));
       });
@@ -148,6 +177,7 @@ function runCommands(opt, password, commands) {
 
 function fetchConfig(opt, password) {
   if (opt.testOnly) return runCommands(opt, password, []);
+  if (opt.vendor === 'cisco') throw new Error('Для Cisco используйте runCommands');
   return runCommands(opt, password, ['display current-configuration']).then(([out]) => extract(out));
 }
 
@@ -204,7 +234,7 @@ function humanError(err) {
   return m;
 }
 
-module.exports = { runCommands, fetchConfig, extract, clean, humanError };
+module.exports = { runCommands, fetchConfig, extract, clean, humanError, VENDORS };
 
 if (require.main === module) {
   main().catch(err => {
