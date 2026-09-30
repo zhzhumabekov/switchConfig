@@ -44,6 +44,11 @@
   <section class="tab" id="tab-all" hidden>
     <div class="stats" id="allStats"></div>
     <div class="sw-grid" id="swGrid"></div>
+    <div class="card" id="allUnknownCard" hidden>
+      <h2>Неизвестные устройства <span class="count" id="allUnknownCount"></span></h2>
+      <p class="hint">MAC-адреса на пользовательских портах всех коммутаторов, которых нет в DHCP, AD и DNS, а также компьютеры, отключённые в AD. Нажмите на строку, чтобы открыть порт.</p>
+      <div id="allUnknownList"></div>
+    </div>
     <div class="card" id="allIssuesCard">
       <h2>Замечания по всем коммутаторам</h2>
       <div class="table-scroll"><table class="tbl" id="allIssues"></table></div>
@@ -82,6 +87,12 @@
         <h2>Сеть управления</h2>
         <div id="mgmtSummary"></div>
       </div>
+    </div>
+
+    <div class="card" id="unknownCard" hidden style="margin-top:16px">
+      <h2>Неизвестные устройства <span class="count" id="unknownCount"></span></h2>
+      <p class="hint">MAC-адреса на пользовательских портах, которых нет ни в DHCP, ни в AD, ни в DNS, а также компьютеры, отключённые в AD. Это могут быть личные ноутбуки, неучтённые роутеры или устройства со статическим IP.</p>
+      <div id="unknownList"></div>
     </div>
   </section>
 

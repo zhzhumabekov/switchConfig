@@ -408,16 +408,105 @@ function liveSources() {
 }
 function ipsForMac(mac) {
   const ips = new Set();
+  const lease = DIR && DIR.byMac.get(mac);
+  if (lease) ips.add(lease.ip);
   for (const { cfg } of liveSources()) for (const a of cfg.state.arp) if (a.mac === mac) ips.add(a.ip);
   return [...ips];
 }
+
+/* ---------- AD / DHCP / DNS ---------- */
+let DIR = null; // { at, byMac, byIp, adByName, dns, errors }
+
+function buildDirectory(d) {
+  if (!d || !d.at) return null;
+  const byMac = new Map(), byIp = new Map(), adByName = new Map();
+  // Активная аренда важнее резервирования без аренды
+  const rank = l => (l.state === 'ReservationOnly' ? 1 : 0);
+  for (const l of d.dhcp || []) {
+    const cur = byMac.get(l.mac);
+    if (!cur || rank(l) < rank(cur)) byMac.set(l.mac, l);
+    byIp.set(l.ip, l);
+  }
+  for (const c of d.ad || []) adByName.set(c.name.toUpperCase(), c);
+  return { at: d.at, byMac, byIp, adByName, dns: d.dns || {}, errors: d.errors || {}, counts: { dhcp: (d.dhcp || []).length, ad: (d.ad || []).length } };
+}
+
+const shortHost = h => String(h || '').split('.')[0];
+function ouPath(dn) {
+  return String(dn || '').split(',').filter(x => /^OU=/i.test(x)).map(x => x.slice(3)).reverse().join(' / ');
+}
+
+// Всё, что известно об устройстве по MAC
+function deviceInfo(mac) {
+  const lease = DIR && DIR.byMac.get(mac);
+  const ips = ipsForMac(mac);
+  let name = lease ? shortHost(lease.host) : '';
+  let source = lease ? (lease.reserved ? 'dhcp-res' : 'dhcp') : '';
+  if (!name && DIR) {
+    const ip = ips.find(i => DIR.dns[i]);
+    if (ip) { name = shortHost(DIR.dns[ip]); source = 'dns'; }
+  }
+  const ad = name && DIR ? DIR.adByName.get(name.toUpperCase()) : null;
+  return {
+    mac, ips, name, source, lease, ad,
+    os: ad ? ad.os : '', ou: ad ? ouPath(ad.dn) : '', description: (ad && ad.description) || (lease && lease.description) || '',
+    known: !!(lease || ad || source === 'dns'),
+  };
+}
+
+function deviceLabel(d, withIp = true) {
+  if (!d.name) return withIp && d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : '';
+  const title = [d.os, d.ou, d.description].filter(Boolean).join(' · ');
+  const off = d.ad && !d.ad.enabled ? ' <span class="flag warn" title="Учётная запись компьютера отключена в AD">откл. в AD</span>' : '';
+  return `<span class="dev" title="${esc(title)}">🖥 <b>${esc(d.name)}</b></span>${withIp && d.ips.length ? ` <span class="mono muted">${esc(d.ips[0])}</span>` : ''}${off}`;
+}
+
 function connectedText(p) {
   if (p.lldp && p.lldp.length) return p.lldp.map(n => `🔗 ${esc(n.device || '?')}${n.remotePort ? ` <span class="muted">(${esc(n.remotePort)})</span>` : ''}`).join('<br>');
   if (p.macs && p.macs.length) {
-    const ip = p.macs.length <= 3 ? p.macs.flatMap(m => ipsForMac(m.mac)) : [];
-    return `${p.macs.length} MAC${ip.length ? ` · <span class="mono">${esc(ip.join(', '))}</span>` : ''}`;
+    if (p.macs.length <= 3) {
+      const parts = p.macs.map(m => deviceInfo(m.mac)).map(d => deviceLabel(d) || `<span class="mono muted" title="Нет в DHCP / AD / DNS">${esc(d.mac)}</span>`);
+      return parts.join('<br>');
+    }
+    return `${p.macs.length} MAC`;
   }
   return p.st && p.st.status === 'up' ? '<span class="muted">нет MAC</span>' : '<span class="muted">—</span>';
+}
+
+// Порт «конечный»: к нему подключено устройство, а не другой коммутатор
+function isEdgePort(p) {
+  return p && !['uplink', 'link'].includes(p.role) && !(p.lldp.length > 0 && p.macs.length > 3) && p.macs.length <= 20;
+}
+
+// MAC на конечных портах, о которых ничего нет в DHCP / AD / DNS
+function unknownDevices(sources) {
+  const out = [];
+  for (const { sw, cfg } of sources) {
+    for (const p of cfg.ports) {
+      if (!p.macs || !isEdgePort(p)) continue;
+      for (const m of p.macs) {
+        const d = deviceInfo(m.mac);
+        if (!d.known) out.push({ sw, cfg, p, m, d });
+        else if (d.ad && !d.ad.enabled) out.push({ sw, cfg, p, m, d, disabled: true });
+      }
+    }
+  }
+  return out;
+}
+
+function unknownHtml(list, withSwitch) {
+  if (!DIR) return '<p class="hint" style="margin:0">Подключите AD / DHCP / DNS в <a href="settings.html">настройках</a>, чтобы видеть неизвестные устройства.</p>';
+  if (!list.length) return '<p class="muted" style="margin:0">Все устройства на портах известны DHCP, AD или DNS.</p>';
+  return `<div class="table-scroll"><table class="tbl"><thead><tr>${withSwitch ? '<th>Коммутатор</th>' : ''}<th>Порт</th><th>MAC</th><th>VLAN</th><th>IP (ARP)</th><th>Причина</th></tr></thead><tbody>
+    ${list.slice(0, 300).map(u => `<tr data-goto-sw="${esc(u.sw ? u.sw.id : '')}" data-goto-port="${esc(u.p.name)}">
+      ${withSwitch ? `<td><b>${esc(u.sw ? u.sw.name : '')}</b></td>` : ''}
+      <td class="mono">${esc(u.p.short)}${u.p.desc ? ` <span class="muted">${esc(u.p.desc)}</span>` : ''}</td>
+      <td class="mono">${esc(u.m.mac)}</td>
+      <td>${u.m.vlan != null ? vlanChip(u.m.vlan, u.cfg || CFG || { vlansDeclared: [], vlanNames: {} }) : '—'}</td>
+      <td class="mono">${esc(u.d.ips.join(', ')) || '<span class="muted">—</span>'}</td>
+      <td>${u.disabled ? `<span class="flag warn">${esc(u.d.name)} отключён в AD</span>` : '<span class="flag warn">нет в DHCP / AD / DNS</span>'}</td>
+    </tr>`).join('')}
+  </tbody></table></div>${list.length > 300 ? `<div class="foot">Показано 300 из ${list.length}</div>` : ''}`;
 }
 
 function render(cfg, sw = null) {
@@ -446,6 +535,7 @@ function render(cfg, sw = null) {
   renderLegend();
   renderPanel(cfg);
   renderKeyLinks(cfg);
+  renderUnknown(cfg, sw);
   renderMgmt(cfg);
   renderProfiles(cfg);
   fillPortFilters(cfg);
@@ -569,6 +659,15 @@ function renderKeyLinks(cfg) {
   const named = cfg.ports.filter(p => p.role === 'access' && p.desc);
   $('#keyLinks').innerHTML = `<ul class="list">${[...key, ...named].map(p => `
     <li>${portLink(p)}${cfg.state ? liveBadge(p) : ''}<span class="grow">${esc(p.desc || '—')}${p.lldp && p.lldp.length ? `<div class="muted" style="font-size:12px">${connectedText(p)}</div>` : ''}</span>${roleChip(p.role)}</li>`).join('')}</ul>`;
+}
+
+function renderUnknown(cfg, sw) {
+  const card = $('#unknownCard');
+  card.hidden = !cfg.state;
+  if (!cfg.state) return;
+  const list = unknownDevices([{ sw, cfg }]);
+  $('#unknownCount').textContent = DIR ? list.length : '';
+  $('#unknownList').innerHTML = unknownHtml(list, false);
 }
 
 function renderMgmt(cfg) {
@@ -867,8 +966,8 @@ function livePortHtml(p) {
     </dl>` : '<div class="muted">Порт не найден в выводе display interface brief.</div>'}
     ${p.lldp.length ? `<div class="sub">LLDP-сосед</div><ul class="list">${p.lldp.map(n => `<li><span class="grow"><b>${esc(n.device || '?')}</b></span><span class="muted">порт</span> <span class="mono">${esc(n.remotePort || '—')}</span></li>`).join('')}</ul>` : ''}
     <div class="sub">MAC-адреса на порту (${macs.length})</div>
-    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP (из ARP)</th></tr></thead><tbody>
-      ${macs.slice(0, MAX).map(m => `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(ipsForMac(m.mac).join(', ')) || '<span class="muted">—</span>'}</td></tr>`).join('')}
+    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP</th>${DIR ? '<th>Устройство</th>' : ''}</tr></thead><tbody>
+      ${macs.slice(0, MAX).map(m => { const d = deviceInfo(m.mac); return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${DIR ? `<td>${d.name ? deviceLabel(d, false) + (d.os || d.ou ? `<div class="muted" style="font-size:12px">${esc([d.os, d.ou].filter(Boolean).join(' · '))}</div>` : '') + (d.description ? `<div class="muted" style="font-size:12px">${esc(d.description)}</div>` : '') : '<span class="flag warn">неизвестно</span>'}</td>` : ''}</tr>`; }).join('')}
     </tbody></table>${macs.length > MAX ? `<div class="muted" style="margin-top:6px">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`
     : '<div class="muted">Нет выученных MAC-адресов.</div>'}`;
 }
@@ -908,6 +1007,7 @@ function toast(msg, kind = '') {
 
 async function loadSwitches() {
   const list = await apiCall('GET', 'api/switches');
+  try { DIR = buildDirectory(await apiCall('GET', 'api/directory')); } catch (e) { DIR = null; }
   const old = new Map(SWITCHES.map(s => [s.id, s]));
   SWITCHES = await Promise.all(list.map(async s => {
     if (!s.hasConfig) return { ...s, cfg: null };
@@ -1012,6 +1112,12 @@ function renderAll() {
     </div>`;
   }).join('');
 
+  // Неизвестные устройства на всех коммутаторах
+  const unk = unknownDevices(liveSources());
+  $('#allUnknownCard').hidden = !liveSources().length;
+  $('#allUnknownCount').textContent = DIR ? unk.length : '';
+  $('#allUnknownList').innerHTML = unknownHtml(unk, true);
+
   // Сводная таблица замечаний
   const SEV = { high: 'Важно', med: 'Внимание' };
   const rows = withCfg.flatMap(s => s.cfg.issues.filter(i => i.sev !== 'info').map(i => ({ s, i })))
@@ -1073,7 +1179,15 @@ function findDevice(q) {
   if (isIp) {
     const full = /^\d+\.\d+\.\d+\.\d+$/.test(q);
     for (const { cfg } of sources) for (const a of cfg.state.arp) if (full ? a.ip === q : a.ip.startsWith(q)) macs.add(a.mac);
-  } else if (isMac) {
+  } else if (DIR && q.length >= 2) {
+    const ql = q.toLowerCase();
+    for (const l of DIR.byMac.values()) if ((l.host || '').toLowerCase().includes(ql) || (l.description || '').toLowerCase().includes(ql)) macs.add(l.mac);
+    for (const c of DIR.adByName.values()) {
+      if (!(c.description || '').toLowerCase().includes(ql)) continue;
+      for (const l of DIR.byMac.values()) if (shortHost(l.host).toUpperCase() === c.name.toUpperCase()) macs.add(l.mac);
+    }
+  }
+  if (isMac) {
     for (const { cfg } of sources) {
       for (const m of cfg.state.mac) if (macHex(m.mac).includes(hex)) macs.add(m.mac);
       for (const a of cfg.state.arp) if (macHex(a.mac).includes(hex)) macs.add(a.mac);
@@ -1090,7 +1204,7 @@ function findDevice(q) {
       seen.push({ sw, cfg, p, m, transit, count: p ? p.macs.length : 999 });
     }
     seen.sort((a, b) => a.transit - b.transit || a.count - b.count);
-    return { mac, ips: ipsForMac(mac), best: seen[0] && !seen[0].transit ? seen[0] : null, seen };
+    return { mac, ips: ipsForMac(mac), info: deviceInfo(mac), best: seen[0] && !seen[0].transit ? seen[0] : null, seen };
   });
 
   // Текстовый поиск: LLDP-соседи и описания портов
@@ -1120,12 +1234,13 @@ function showFind(q) {
   const times = r.sources.map(s => `${s.sw ? s.sw.name + ': ' : ''}${ago(s.cfg.state.at)}`).join(', ');
 
   let html = '';
-  if (!r.sources.length) {
+  if (!r.sources.length && !r.devices.length) {
     html = '<p class="muted">Нет данных о состоянии портов. Нажмите «Обновить», чтобы забрать их с коммутаторов.</p>';
   } else if (r.devices.length) {
     html = r.devices.map(d => `<div class="find-item">
-      <div class="h"><span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
-      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">Конечный порт не найден — MAC виден только через аплинки${d.seen.length ? '' : ' (нет в таблицах MAC — есть только запись ARP)'}.</div>`}
+      <div class="h">${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
+      ${d.info.os || d.info.ou || d.info.description ? `<div class="muted" style="font-size:12.5px">${esc([d.info.os, d.info.ou, d.info.description].filter(Boolean).join(' · '))}</div>` : ''}
+      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).'}</div>`}
       ${d.seen.filter(s => s !== d.best).length ? `<details><summary class="muted">Также виден через ${d.seen.filter(s => s !== d.best).length}</summary>
         ${d.seen.filter(s => s !== d.best).map(s => `<div class="muted" style="font-size:12.5px">${loc(s)}${s.p ? ' · ' + esc(ROLES[s.p.role].label.toLowerCase()) : ''}</div>`).join('')}</details>` : ''}
     </div>`).join('');
@@ -1134,7 +1249,7 @@ function showFind(q) {
   } else {
     html = `<p>Ничего не найдено по «${esc(q)}».</p>`;
   }
-  html += `<p class="hint" style="margin-top:14px">Ищется по MAC (в любом формате, можно часть), IP или имени LLDP-соседа / описанию порта.
+  html += `<p class="hint" style="margin-top:14px">Ищется по MAC (в любом формате, можно часть), IP, имени компьютера (DHCP / AD), имени LLDP-соседа или описанию порта.
     IP находится по таблице ARP — полнее всего, если в список добавлен коммутатор ядра (шлюз сети).${times ? ` Данные: ${esc(times)}.` : ''}</p>`;
 
   $('#drawerTitle').textContent = `Поиск: ${q}`;

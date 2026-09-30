@@ -9,6 +9,7 @@ const path = require('path');
 const store = require('./store');
 const { runCommands, fetchConfig, extract, humanError } = require('./fetch-config');
 const live = require('./live-state');
+const directory = require('./directory');
 const { redact } = require('./update-config');
 
 const PORT = +process.env.PORT || 8080;
@@ -108,6 +109,7 @@ async function doFetch(id) {
       cur.stateAt = state.at;
       store.save(fresh);
     }
+    await directory.refreshIfStale(10 * 60 * 1000);
     return { ok: true, changed, lines: text.split('\n').length - 1, stateErrors: state.errors };
   } catch (err) {
     const msg = err instanceof HttpError ? err.message : humanError(err);
@@ -173,6 +175,30 @@ async function api(req, res, parts) {
     return send(res, 200, await doFetch(id));
   }
 
+  if (res1 === 'directory') {
+    if (!id && method === 'GET') return send(res, 200, directory.readResult() || {});
+    if (id === 'settings' && method === 'GET') return send(res, 200, { ...directory.publicSettings(), last: directory.summary() });
+    if (id === 'settings' && method === 'PUT') {
+      const b = await readBody(req);
+      const cur = directory.loadSettings();
+      const next = {
+        ...cur,
+        enabled: !!b.enabled, dhcp: b.dhcp !== false, ad: b.ad !== false, dns: b.dns !== false,
+        dhcpServers: String(b.dhcpServers || '').trim(),
+        user: String(b.user || '').trim(),
+      };
+      if (!/^[A-Za-z0-9.\-_,;\s]*$/.test(next.dhcpServers)) throw new HttpError(400, 'Некорректный список DHCP-серверов');
+      if (b.password) next.secret = await store.encrypt(String(b.password));
+      if (!next.user || b.clearPassword) next.secret = null;
+      directory.saveSettings(next);
+      return send(res, 200, { ...directory.publicSettings(next), last: directory.summary() });
+    }
+    if (id === 'refresh' && method === 'POST') {
+      try { return send(res, 200, { ok: true, ...(await directory.refresh()) }); }
+      catch (err) { return send(res, 200, { ok: false, error: err.message }); }
+    }
+  }
+
   if (res1 === 'fetch-all' && method === 'POST') {
     const ids = store.load().filter(s => s.secret).map(s => s.id);
     const results = {};
@@ -181,6 +207,7 @@ async function api(req, res, parts) {
     await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
       while (queue.length) { const i = queue.shift(); results[i] = await doFetch(i).catch(e => ({ ok: false, error: e.message })); }
     }));
+    await directory.refreshIfStale(60 * 1000);
     return send(res, 200, results);
   }
 

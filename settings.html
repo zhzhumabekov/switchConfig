@@ -75,6 +75,41 @@
     </div>
   </div>
 
+  <div class="card" id="dirCard" hidden>
+    <div class="card-head">
+      <h2>Windows-серверы: AD, DHCP, DNS</h2>
+      <span class="form-status" id="dirLast"></span>
+    </div>
+    <p class="hint">По MAC-адресам с портов коммутаторов находятся имя компьютера и IP (из DHCP), описание, ОС и подразделение (из AD), имена статических адресов (из DNS). Всё только читается.</p>
+    <form id="dirForm" autocomplete="off">
+      <label class="chk" style="margin-bottom:10px"><input type="checkbox" name="enabled"> <b style="color:var(--text)">Использовать данные AD / DHCP / DNS</b></label>
+      <div class="form-grid">
+        <label class="field">DHCP-серверы
+          <input name="dhcpServers" placeholder="пусто — найти автоматически в AD">
+          <small class="muted">Через запятую, если нужно указать вручную</small>
+        </label>
+        <div class="field">Источники
+          <label class="chk"><input type="checkbox" name="dhcp"> DHCP (аренды и резервирования)</label>
+          <label class="chk"><input type="checkbox" name="ad"> Active Directory (компьютеры)</label>
+          <label class="chk"><input type="checkbox" name="dns"> DNS (имена статических IP)</label>
+        </div>
+        <label class="field">Учётная запись
+          <input name="user" placeholder="">
+          <small class="muted" id="dirUserHint"></small>
+        </label>
+        <label class="field" id="dirPwField">Пароль
+          <input name="password" type="password" autocomplete="new-password">
+          <small class="muted" id="dirPwHint"></small>
+        </label>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn primary">Сохранить</button>
+        <button type="button" class="btn" id="dirRefresh">Сохранить и загрузить данные</button>
+        <span class="form-status" id="dirStatus"></span>
+      </div>
+    </form>
+  </div>
+
   <p class="hint">🔒 Пароли хранятся в <code>data/switches.json</code> в зашифрованном виде (Windows DPAPI): расшифровать их может только ваша учётная запись Windows на этом компьютере. В браузер пароли не передаются. Сервер доступен только с этого компьютера (127.0.0.1).</p>
 </main>
 

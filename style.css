@@ -386,3 +386,8 @@ a.btn { text-decoration: none; }
 .find-item details { margin-top: 6px; }
 .find-item summary { cursor: pointer; font-size: 12.5px; }
 @media (max-width: 640px) { .find-input { min-width: 0; width: 100%; } }
+
+/* ---------- AD / DHCP / DNS ---------- */
+.field .chk { color: var(--text); font-size: 13px; }
+.field input[type="checkbox"] { width: auto; padding: 0; }
+.dev { white-space: nowrap; }

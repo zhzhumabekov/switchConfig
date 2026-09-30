@@ -225,5 +225,76 @@ $('#fetchAll').addEventListener('click', async () => {
   renderList();
 });
 
+/* ---------- AD / DHCP / DNS ---------- */
+function dirSummary(last) {
+  if (!last) return 'данные ещё не загружались';
+  const c = last.counts;
+  const errs = Object.entries(last.errors || {});
+  return `загружено ${ago(last.at)}: DHCP ${c.dhcp} (резерв. ${c.reserved}), AD ${c.ad} компьютеров, DNS ${c.dns} имён` +
+    (errs.length ? ` · ошибки: ${errs.map(([k, v]) => `${k}: ${v}`).join('; ')}` : '');
+}
+
+function fillDir(s) {
+  const f = $('#dirForm').elements;
+  f.enabled.checked = s.enabled;
+  f.dhcpServers.value = s.dhcpServers || '';
+  f.dhcp.checked = s.dhcp; f.ad.checked = s.ad; f.dns.checked = s.dns;
+  f.user.value = s.user || '';
+  f.user.placeholder = s.currentUser ? `пусто — текущая: ${s.currentUser}` : 'DOMAIN\\user';
+  f.password.value = '';
+  f.password.placeholder = s.hasPassword ? '•••••••• (сохранён)' : '';
+  $('#dirUserHint').textContent = 'Пусто — используется ваша учётная запись Windows. Нужны права на чтение DHCP (группа «DHCP Users»).';
+  $('#dirPwHint').textContent = s.hasPassword ? 'Оставьте пустым, чтобы не менять' : 'Только если указана другая учётная запись';
+  const last = s.last;
+  $('#dirLast').textContent = dirSummary(last);
+  $('#dirLast').className = 'form-status' + (last && Object.keys(last.errors || {}).length ? ' err' : '');
+}
+
+async function loadDir() {
+  try { fillDir(await api('GET', 'api/directory/settings')); $('#dirCard').hidden = false; }
+  catch (e) { /* сервер старой версии или недоступен */ }
+}
+
+async function saveDir() {
+  const f = $('#dirForm').elements;
+  const body = {
+    enabled: f.enabled.checked, dhcp: f.dhcp.checked, ad: f.ad.checked, dns: f.dns.checked,
+    dhcpServers: f.dhcpServers.value, user: f.user.value,
+  };
+  if (f.password.value) body.password = f.password.value;
+  const s = await api('PUT', 'api/directory/settings', body);
+  fillDir(s);
+  return s;
+}
+
+function dirStatus(msg, kind = '') {
+  $('#dirStatus').textContent = msg;
+  $('#dirStatus').className = 'form-status ' + kind;
+}
+
+$('#dirForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  try { await saveDir(); dirStatus('Сохранено', 'ok'); } catch (err) { dirStatus(err.message, 'err'); }
+});
+
+$('#dirRefresh').addEventListener('click', async () => {
+  const btn = $('#dirRefresh');
+  try {
+    const s = await saveDir();
+    if (!s.enabled) { dirStatus('Сначала включите «Использовать данные AD / DHCP / DNS»', 'err'); return; }
+    btn.disabled = true;
+    dirStatus('Загружаю данные из AD и DHCP…');
+    const r = await api('POST', 'api/directory/refresh', {});
+    if (!r.ok) dirStatus(r.error, 'err');
+    else {
+      const errs = Object.keys(r.errors || {}).length;
+      dirStatus(`✓ DHCP: ${r.counts.dhcp}, AD: ${r.counts.ad}, DNS: ${r.counts.dns}${errs ? ` · есть ошибки (${errs})` : ''}`, errs ? 'err' : 'ok');
+      loadDir();
+    }
+  } catch (err) { dirStatus(err.message, 'err'); }
+  btn.disabled = false;
+});
+
 load();
+loadDir();
 })();
