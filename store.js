@@ -13,9 +13,11 @@ const { execFile } = require('child_process');
 
 const DATA = path.join(__dirname, 'data');
 const CONFIGS = path.join(DATA, 'configs');
+const STATES = path.join(DATA, 'state');
 const LIST = path.join(DATA, 'switches.json');
 
 fs.mkdirSync(CONFIGS, { recursive: true });
+fs.mkdirSync(STATES, { recursive: true });
 
 /* ---------- шифрование ---------- */
 function powershell(script, input) {
@@ -113,8 +115,21 @@ function writeConfig(id, text) {
   return true;
 }
 
-function removeConfig(id) {
-  for (const f of [configPath(id), prevPath(id)]) if (fs.existsSync(f)) fs.unlinkSync(f);
+// Состояние портов (JSON) и сырой вывод команд — для проверки, если разбор что-то не распознал
+const statePath = id => path.join(STATES, `${id}.json`);
+const rawStatePath = id => path.join(STATES, `${id}.raw.txt`);
+
+function writeState(id, state, raw) {
+  fs.writeFileSync(statePath(id), JSON.stringify(state));
+  fs.writeFileSync(rawStatePath(id), Object.entries(raw).map(([k, v]) => `===== ${k} =====\n${v ?? ''}`).join('\n\n'));
+}
+function readState(id) {
+  const f = statePath(id);
+  return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
 }
 
-module.exports = { load, save, encrypt, decrypt, makeId, readConfig, writeConfig, removeConfig, configPath };
+function removeConfig(id) {
+  for (const f of [configPath(id), prevPath(id), statePath(id), rawStatePath(id)]) if (fs.existsSync(f)) fs.unlinkSync(f);
+}
+
+module.exports = { load, save, encrypt, decrypt, makeId, readConfig, writeConfig, removeConfig, configPath, writeState, readState };

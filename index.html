@@ -16,6 +16,7 @@
       <div class="meta" id="meta"></div>
     </div>
     <div class="top-actions">
+      <input type="search" id="findInput" class="find-input" hidden placeholder="Где подключено: MAC / IP / имя" aria-label="Поиск устройства" title="Введите MAC, IP или имя и нажмите Enter">
       <select id="swSelect" class="sw-select" hidden aria-label="Коммутатор"></select>
       <button class="btn" id="refreshBtn" hidden>Обновить с коммутатора</button>
       <a class="btn" id="settingsLink" href="settings.html" hidden>Настройки</a>
@@ -100,6 +101,14 @@
           <select id="portMember"><option value="">Все члены стека</option></select>
           <select id="portRole"><option value="">Все роли</option></select>
           <select id="portVlan"><option value="">Любой VLAN</option></select>
+          <select id="portLive" hidden>
+            <option value="">Любое состояние</option>
+            <option value="up">Только up</option>
+            <option value="down">Не работают (down / shutdown / петля)</option>
+            <option value="lbdt">Заблокированы петлёй</option>
+            <option value="err">С ошибками</option>
+            <option value="lldp">С LLDP-соседом</option>
+          </select>
           <label class="chk"><input type="checkbox" id="portHideEmpty" checked> скрыть ненастроенные</label>
           <button class="btn ghost" id="portReset">Сбросить</button>
         </div>
@@ -107,7 +116,7 @@
       <div class="table-scroll">
         <table class="tbl" id="portTable">
           <thead><tr>
-            <th>Порт</th><th>Роль</th><th>Описание</th><th>PVID</th><th>Разрешённые VLAN</th><th>Опции</th>
+            <th>Порт</th><th class="live-col">Сейчас</th><th>Роль</th><th>Описание</th><th class="live-col">Подключено</th><th>PVID</th><th>Разрешённые VLAN</th><th>Опции</th>
           </tr></thead>
           <tbody></tbody>
         </table>

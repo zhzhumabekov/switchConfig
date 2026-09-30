@@ -349,3 +349,40 @@ a.btn { text-decoration: none; }
 .matrix .yes { color: var(--text); font-variant-numeric: tabular-nums; }
 .matrix .no { color: var(--muted); opacity: .5; }
 .matrix .bad { color: var(--sev-med); }
+
+/* ---------- живое состояние портов ---------- */
+:root { --st-up: #2fa84f; --st-lbdt: #e8910c; --st-err: #d93a32; }
+.port.st-down:not(.dim), .port.st-admin:not(.dim) { opacity: .42; }
+.port.st-admin { background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgba(255, 255, 255, .45) 3px 5px); }
+.port.st-lbdt { box-shadow: 0 0 0 2px var(--st-lbdt); }
+.port.st-up::before, .port.st-lbdt::before, .port.st-err::before {
+  content: ""; position: absolute; left: 3px; right: 3px; bottom: 1px; height: 3px; border-radius: 2px;
+  background: var(--st-up); box-shadow: 0 0 0 1px rgba(0, 0, 0, .15);
+}
+.port.st-lbdt::before { background: var(--st-lbdt); }
+.port.st-err::before { background: var(--st-err); }
+.mini .port::before { display: none; }
+.mini .port.st-lbdt, .mini .port.st-err { box-shadow: 0 0 0 1px var(--st-err); }
+
+.legend-sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+.legend-st { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.led { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.led-up { background: var(--st-up); }
+.led-down { background: transparent; border: 1px solid var(--muted); }
+.led-admin { background: repeating-linear-gradient(135deg, var(--muted) 0 2px, transparent 2px 4px); }
+.led-lbdt { background: var(--st-lbdt); }
+.led-err { background: var(--st-err); }
+
+.live { display: inline-block; font-size: 11px; font-weight: 600; padding: 0 7px; border-radius: 9px; white-space: nowrap; background: var(--surface-2); color: var(--muted); }
+.live-up { background: rgba(47, 168, 79, .14); color: var(--st-up); }
+.live-lbdt { background: var(--sev-med-bg); color: var(--sev-med); }
+.live-admin { text-decoration: line-through; }
+.no-live .live-col { display: none; }
+
+.find-input { min-width: 240px; }
+.find-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.find-item .h { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.find-item .where { font-size: 13px; margin-top: 2px; }
+.find-item details { margin-top: 6px; }
+.find-item summary { cursor: pointer; font-size: 12.5px; }
+@media (max-width: 640px) { .find-input { min-width: 0; width: 100%; } }

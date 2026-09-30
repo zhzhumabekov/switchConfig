@@ -68,15 +68,19 @@ function clean(text) {
     .replace(/\r/g, '');
 }
 
-const PROMPT = /(?:^|\n)[<\[][^<>\[\]\r\n]{1,64}[>\]]\s*$/;
+const PROMPT = /(?:^|\n)([<\[][^<>\[\]\r\n]{1,64}[>\]])\s*$/;
 
-// opt.testOnly — только войти и вернуть имя из приглашения (<SWITCH-NAME>), без чтения конфига
-function fetchConfig(opt, password) {
+// Выполняет команды в одной SSH-сессии и возвращает их вывод (по элементу на команду).
+// opt.testOnly — только войти и вернуть имя из приглашения (<SWITCH-NAME>), без команд.
+function runCommands(opt, password, commands) {
   const timeout = opt.timeout || 60;
   return new Promise((resolve, reject) => {
     const conn = new Client();
+    const queue = ['screen-length 0 temporary', ...commands];
+    const outputs = [];
     let buf = '';
-    let stage = 'login';
+    let idx = -1;       // -1 — ждём приглашение после входа
+    let prompt = null;  // приглашение, например <SWITCH-NAME>
     let settled = false;
     const finish = (err, value) => {
       if (settled) return;
@@ -98,23 +102,24 @@ function fetchConfig(opt, password) {
           // Старые версии VRP игнорируют screen-length — отвечаем пробелом на пагинацию
           if (/---- More ----\s*$/.test(buf)) { stream.write(' '); return; }
           if (/\[Y\/N\]:?\s*$/i.test(buf)) { stream.write('N\n'); return; }  // напр. «сменить пароль?»
-          if (!PROMPT.test(buf)) return;
 
-          if (stage === 'login') {
-            if (opt.testOnly) {
-              const m = clean(buf).match(/[<\[]([^<>\[\]\r\n]+)[>\]]\s*$/);
-              send('quit');
-              return finish(null, m ? m[1] : '');
-            }
-            stage = 'len'; buf = ''; send('screen-length 0 temporary');
-          } else if (stage === 'len') {
-            stage = 'config'; buf = ''; send('display current-configuration');
-          } else if (stage === 'config') {
-            send('quit');
-            try { finish(null, extract(clean(buf))); } catch (e) { finish(e); }
+          if (!prompt) {
+            const m = clean(buf).match(PROMPT);
+            if (!m) return;
+            prompt = m[1];
+            if (opt.testOnly) { send('quit'); return finish(null, prompt.slice(1, -1)); }
+          } else if (!clean(buf).replace(/\s+$/, '').endsWith(prompt)) {
+            return; // команда ещё выводит данные
+          } else if (idx >= 1) {
+            outputs[idx - 1] = clean(buf); // idx 0 — screen-length, его вывод не нужен
           }
+
+          idx++;
+          buf = '';
+          if (idx < queue.length) send(queue[idx]);
+          else { send('quit'); finish(null, outputs); }
         });
-        stream.on('close', () => finish(new Error('Сессия закрылась до получения конфигурации')));
+        stream.on('close', () => finish(new Error('Сессия закрылась до получения данных')));
       });
     });
 
@@ -139,6 +144,11 @@ function fetchConfig(opt, password) {
       },
     });
   });
+}
+
+function fetchConfig(opt, password) {
+  if (opt.testOnly) return runCommands(opt, password, []);
+  return runCommands(opt, password, ['display current-configuration']).then(([out]) => extract(out));
 }
 
 // Оставляет только конфигурацию: от первой строки после команды до «return»
@@ -194,7 +204,7 @@ function humanError(err) {
   return m;
 }
 
-module.exports = { fetchConfig, extract, clean, humanError };
+module.exports = { runCommands, fetchConfig, extract, clean, humanError };
 
 if (require.main === module) {
   main().catch(err => {

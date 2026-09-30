@@ -361,6 +361,65 @@ function prepare(cfg) {
   return cfg;
 }
 
+/* ---------- живое состояние (display interface brief / lldp / mac / arp) ---------- */
+const ST_LABEL = { up: 'up', down: 'down', admin: 'shutdown', lbdt: 'петля', standby: 'резерв' };
+
+function groupBy(arr, key) {
+  const o = {};
+  for (const x of arr || []) (o[x[key]] ||= []).push(x);
+  return o;
+}
+
+function attachState(cfg, st) {
+  cfg.state = st;
+  const lldpBy = groupBy(st.lldp, 'port'), macBy = groupBy(st.mac, 'port');
+  for (const p of cfg.ports) {
+    p.st = st.interfaces[p.name] || null;
+    p.lldp = lldpBy[p.name] || [];
+    p.macs = macBy[p.name] || [];
+  }
+  // Замечания по текущему состоянию
+  const ports = cfg.ports.filter(p => p.st);
+  const loop = ports.filter(p => p.st.status === 'lbdt');
+  if (loop.length) cfg.issues.push({ sev: 'high', live: true, title: 'Порт заблокирован из-за петли', body: 'Loopback-detect обнаружил петлю и выключил порт (#down). Найдите кабель, который замыкает сеть (например, воткнут в два порта), и уберите его.', ports: loop });
+  const upDown = ports.filter(p => ['uplink', 'link'].includes(p.role) && p.st.status !== 'up');
+  if (upDown.length) cfg.issues.push({ sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
+  const errs = ports.filter(p => p.st.inErr + p.st.outErr > 0);
+  if (errs.length) cfg.issues.push({ sev: 'med', live: true, title: 'Ошибки на портах', body: 'Счётчики inErrors/outErrors не нулевые: возможна плохая линия, кабель или несогласованная скорость/дуплекс.', ports: errs });
+  const order = { high: 0, med: 1, info: 2 };
+  cfg.issues.sort((a, b) => order[a.sev] - order[b.sev]);
+  return cfg;
+}
+
+function stClass(p) {
+  if (!p.st) return '';
+  return ` st-${p.st.status}${p.st.inErr + p.st.outErr > 0 ? ' st-err' : ''}`;
+}
+function liveBadge(p) {
+  if (!p.st) return '<span class="muted">—</span>';
+  const errs = p.st.inErr + p.st.outErr;
+  return `<span class="live live-${p.st.status}">${ST_LABEL[p.st.status] || esc(p.st.phy)}</span>${errs ? ` <span class="flag warn" title="inErrors ${p.st.inErr}, outErrors ${p.st.outErr}">ошибки</span>` : ''}`;
+}
+
+// Источники живых данных: все коммутаторы (сервер) или текущий конфиг
+function liveSources() {
+  if (SERVER) return SWITCHES.filter(s => s.cfg && s.cfg.state).map(s => ({ sw: s, cfg: s.cfg }));
+  return CFG && CFG.state ? [{ sw: null, cfg: CFG }] : [];
+}
+function ipsForMac(mac) {
+  const ips = new Set();
+  for (const { cfg } of liveSources()) for (const a of cfg.state.arp) if (a.mac === mac) ips.add(a.ip);
+  return [...ips];
+}
+function connectedText(p) {
+  if (p.lldp && p.lldp.length) return p.lldp.map(n => `🔗 ${esc(n.device || '?')}${n.remotePort ? ` <span class="muted">(${esc(n.remotePort)})</span>` : ''}`).join('<br>');
+  if (p.macs && p.macs.length) {
+    const ip = p.macs.length <= 3 ? p.macs.flatMap(m => ipsForMac(m.mac)) : [];
+    return `${p.macs.length} MAC${ip.length ? ` · <span class="mono">${esc(ip.join(', '))}</span>` : ''}`;
+  }
+  return p.st && p.st.status === 'up' ? '<span class="muted">нет MAC</span>' : '<span class="muted">—</span>';
+}
+
 function render(cfg, sw = null) {
   CFG = cfg;
   if (!cfg.issues) prepare(cfg);
@@ -433,12 +492,13 @@ function renderStats(cfg) {
   const items = [
     { v: cfg.ports.length, l: 'Физических портов', s: `${ge} × 1G, ${xge} × 10G` },
     { v: cfgd, l: 'Настроено', s: `${cfg.ports.length - cfgd} без настроек` },
+    cfg.state && { v: cfg.ports.filter(p => p.st && p.st.status === 'up').length, l: 'Подключено сейчас (up)', s: `данные ${ago(cfg.state.at)}` },
     { v: byRole('access'), l: 'Рабочих мест', s: 'ПК + IP-телефон' },
     { v: byRole('ap'), l: 'Wi‑Fi (AP / AC)', s: '' },
     { v: byRole('uplink') + byRole('link'), l: 'Магистральных линков', s: `${byRole('trunk')} расширенных транков` },
     { v: rangesSize(cfg.vlansDeclared), l: 'VLAN создано', s: `${cfg.vlanifs.filter(v => !v.shutdown).length} L3-интерфейса` },
     { v: cfg.issues.length, l: 'Замечаний', s: `${cfg.issues.filter(i => i.sev === 'high').length} важных` },
-  ];
+  ].filter(Boolean);
   $('#stats').innerHTML = items.map(i => `<div class="stat"><div class="v">${i.v}</div><div class="l">${i.l}</div>${i.s ? `<div class="s">${i.s}</div>` : ''}</div>`).join('');
 }
 
@@ -447,7 +507,21 @@ function renderLegend() {
   for (const p of CFG.ports) counts[p.role] = (counts[p.role] || 0) + 1;
   $('#legend').innerHTML = ROLE_ORDER.filter(r => counts[r]).map(r =>
     `<span class="legend-item ${state.hiddenRoles.has(r) ? 'off' : ''}" data-role="${r}" title="Нажмите, чтобы скрыть или показать">
-      <span class="sw ${r === 'empty' ? 'empty' : ''}" style="--c:var(${ROLES[r].color})"></span>${ROLES[r].label} <b>${counts[r]}</b></span>`).join('');
+      <span class="sw ${r === 'empty' ? 'empty' : ''}" style="--c:var(${ROLES[r].color})"></span>${ROLES[r].label} <b>${counts[r]}</b></span>`).join('') + liveLegend(CFG);
+}
+
+function liveLegend(cfg) {
+  if (!cfg.state) return '';
+  const n = f => cfg.ports.filter(p => p.st && f(p.st)).length;
+  const items = [
+    ['up', 'up', n(s => s.status === 'up')],
+    ['down', 'down', n(s => s.status === 'down')],
+    ['admin', 'shutdown', n(s => s.status === 'admin')],
+    ['lbdt', 'петля', n(s => s.status === 'lbdt')],
+    ['err', 'ошибки', n(s => s.inErr + s.outErr > 0)],
+  ].filter(([k, , c]) => c || k === 'up' || k === 'down');
+  return `<span class="legend-sep"></span><span class="legend-st">Сейчас (${esc(ago(cfg.state.at))}):</span>` +
+    items.map(([k, label, c]) => `<span class="legend-st"><span class="led led-${k}"></span>${label} <b>${c}</b></span>`).join('');
 }
 
 function renderPanel(cfg) {
@@ -481,7 +555,7 @@ function panelHtml(cfg, mini) {
 
 function portCell(p, mini) {
   const v = !mini && state.panelVlan ? +state.panelVlan : null;
-  let cls = `port ${p.type} ${p.role === 'empty' ? 'empty' : ''} ${p.desc ? 'has-desc' : ''}`;
+  let cls = `port ${p.type} ${p.role === 'empty' ? 'empty' : ''} ${p.desc ? 'has-desc' : ''}${stClass(p)}`;
   if (!mini && state.hiddenRoles.has(p.role)) cls += ' dim';
   else if (v != null) {
     if (!carries(p, v)) cls += ' dim';
@@ -494,7 +568,7 @@ function renderKeyLinks(cfg) {
   const key = cfg.ports.filter(p => ['uplink', 'link', 'ap', 'printer', 'test'].includes(p.role) || (p.desc && p.role !== 'access')).sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role) || portSort(a, b));
   const named = cfg.ports.filter(p => p.role === 'access' && p.desc);
   $('#keyLinks').innerHTML = `<ul class="list">${[...key, ...named].map(p => `
-    <li>${portLink(p)}<span class="grow">${esc(p.desc || '—')}</span>${roleChip(p.role)}</li>`).join('')}</ul>`;
+    <li>${portLink(p)}${cfg.state ? liveBadge(p) : ''}<span class="grow">${esc(p.desc || '—')}${p.lldp && p.lldp.length ? `<div class="muted" style="font-size:12px">${connectedText(p)}</div>` : ''}</span>${roleChip(p.role)}</li>`).join('')}</ul>`;
 }
 
 function renderMgmt(cfg) {
@@ -549,12 +623,24 @@ function fillPortFilters(cfg) {
   $('#portMember').innerHTML = '<option value="">Все члены стека</option>' + cfg.members.map(s => `<option value="${s}">Slot ${s}</option>`).join('');
   $('#portRole').innerHTML = '<option value="">Все роли</option>' + ROLE_ORDER.filter(r => cfg.ports.some(p => p.role === r)).map(r => `<option value="${r}">${ROLES[r].label}</option>`).join('');
   $('#portVlan').innerHTML = '<option value="">Любой VLAN</option>' + cfg.usedVlans.map(v => `<option value="${v}">${v}${cfg.vlanNames[v] ? ' · ' + esc(cfg.vlanNames[v]) : ''}</option>`).join('');
+  $('#portLive').hidden = !cfg.state;
+  $('#portLive').value = '';
+  $('#portTable').classList.toggle('no-live', !cfg.state);
 }
+
+const LIVE_FILTERS = {
+  up: p => p.st && p.st.status === 'up',
+  down: p => p.st && p.st.status !== 'up',
+  lbdt: p => p.st && p.st.status === 'lbdt',
+  err: p => p.st && p.st.inErr + p.st.outErr > 0,
+  lldp: p => p.lldp && p.lldp.length > 0,
+};
 
 function filteredPorts() {
   const q = $('#portSearch').value.trim().toLowerCase();
   const mem = $('#portMember').value, role = $('#portRole').value, vlan = $('#portVlan').value;
   const hideEmpty = $('#portHideEmpty').checked;
+  const live = CFG.state ? $('#portLive').value : '';
   const prof = state.profile != null ? new Set(CFG.profiles[state.profile].ports) : null;
   return CFG.ports.filter(p => {
     if (prof && !prof.has(p)) return false;
@@ -562,8 +648,10 @@ function filteredPorts() {
     if (mem !== '' && p.slot !== +mem) return false;
     if (role && p.role !== role) return false;
     if (vlan && !carries(p, +vlan)) return false;
+    if (live && !LIVE_FILTERS[live](p)) return false;
     if (q) {
-      const hay = [p.name, p.short, p.desc, p.portDesc, ROLES[p.role].label, rangesText(p.allowed).join(' '), p.lines.join(' ')].join(' ').toLowerCase();
+      const hay = [p.name, p.short, p.desc, p.portDesc, ROLES[p.role].label, rangesText(p.allowed).join(' '), p.lines.join(' '),
+        ...(p.lldp || []).map(n => n.device), ...(p.macs || []).flatMap(m => [m.mac, m.mac.replace(/-/g, ''), ...ipsForMac(m.mac)])].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -574,12 +662,14 @@ function renderPortTable() {
   const rows = filteredPorts();
   $('#portTable tbody').innerHTML = rows.map(p => `<tr data-port="${esc(p.name)}">
     <td><span class="mono"><b>${esc(p.short)}</b></span></td>
+    <td class="live-col">${liveBadge(p)}</td>
     <td>${roleChip(p.role)}</td>
     <td>${p.desc ? esc(p.desc) : '<span class="muted">—</span>'}${p.portDesc && p.portDesc !== p.desc ? ` <span class="muted" title="port description">(${esc(p.portDesc)})</span>` : ''}</td>
+    <td class="live-col">${connectedText(p)}</td>
     <td>${p.effPvid != null ? vlanChip(p.effPvid, CFG) + (p.pvid == null ? ' <span class="muted" title="PVID не задан явно">по умолч.</span>' : '') : '<span class="muted">—</span>'}</td>
     <td>${p.allowed.length ? vlanChipsFromRanges(p.allowed, CFG) : '<span class="muted">—</span>'}</td>
     <td>${portFlags(p) || '<span class="muted">—</span>'}</td>
-  </tr>`).join('') || `<tr><td colspan="6" class="muted">Нет портов, подходящих под фильтр</td></tr>`;
+  </tr>`).join('') || `<tr><td colspan="8" class="muted">Нет портов, подходящих под фильтр</td></tr>`;
   const prof = state.profile != null ? ` · фильтр по профилю <button class="plink" id="clearProfile">сбросить</button>` : '';
   $('#portFoot').innerHTML = `Показано ${rows.length} из ${CFG.ports.length}${prof}`;
 }
@@ -755,6 +845,7 @@ function openPort(name) {
       <dt>Разрешённые VLAN</dt><dd>${p.allowed.length ? vlanChipsFromRanges(p.allowed, CFG) : '—'}</dd>
       <dt>Опции</dt><dd>${portFlags(p) || '—'}</dd>
     </dl>
+    ${CFG.state ? livePortHtml(p) : ''}
     ${issues.length ? `<div class="sub">Замечания</div>${issues.map(i => `<div class="issue sev-${i.sev}" style="padding:8px 12px"><div class="it">${esc(i.title)}</div></div>`).join('')}` : ''}
     <div class="sub">Конфигурация</div>
     <pre>interface ${esc(p.name)}${p.lines.length ? '\n' + esc(p.lines.map(l => ' ' + l).join('\n')) : '\n <span class="muted"># нет настроек</span>'}</pre>
@@ -764,6 +855,24 @@ function openPort(name) {
   $('#drawer').setAttribute('aria-hidden', 'false');
   $('#scrim').hidden = false;
 }
+function livePortHtml(p) {
+  const st = p.st;
+  const macs = p.macs || [];
+  const MAX = 50;
+  return `<div class="sub">Сейчас <span class="muted" style="text-transform:none;letter-spacing:0">· данные ${esc(ago(CFG.state.at))}</span></div>
+    ${st ? `<dl class="kv">
+      <dt>Состояние</dt><dd>${liveBadge(p)} <span class="muted mono">PHY ${esc(st.phy)} / Protocol ${esc(st.proto)}</span></dd>
+      <dt>Загрузка</dt><dd>вход ${esc(st.inUti || '—')} · выход ${esc(st.outUti || '—')}</dd>
+      <dt>Ошибки</dt><dd>${st.inErr + st.outErr ? `<span style="color:var(--sev-high)">вход ${st.inErr}, выход ${st.outErr}</span>` : 'нет'}</dd>
+    </dl>` : '<div class="muted">Порт не найден в выводе display interface brief.</div>'}
+    ${p.lldp.length ? `<div class="sub">LLDP-сосед</div><ul class="list">${p.lldp.map(n => `<li><span class="grow"><b>${esc(n.device || '?')}</b></span><span class="muted">порт</span> <span class="mono">${esc(n.remotePort || '—')}</span></li>`).join('')}</ul>` : ''}
+    <div class="sub">MAC-адреса на порту (${macs.length})</div>
+    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP (из ARP)</th></tr></thead><tbody>
+      ${macs.slice(0, MAX).map(m => `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(ipsForMac(m.mac).join(', ')) || '<span class="muted">—</span>'}</td></tr>`).join('')}
+    </tbody></table>${macs.length > MAX ? `<div class="muted" style="margin-top:6px">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`
+    : '<div class="muted">Нет выученных MAC-адресов.</div>'}`;
+}
+
 function closeDrawer() {
   $('#drawer').classList.remove('open');
   $('#drawer').setAttribute('aria-hidden', 'true');
@@ -803,10 +912,16 @@ async function loadSwitches() {
   SWITCHES = await Promise.all(list.map(async s => {
     if (!s.hasConfig) return { ...s, cfg: null };
     const prev = old.get(s.id);
-    // Не перечитываем конфиг, если он не обновлялся
-    if (prev && prev.cfg && prev.lastFetch === s.lastFetch) return { ...s, cfg: prev.cfg };
-    try { return { ...s, cfg: prepare(parseConfig(await apiCall('GET', `api/switches/${encodeURIComponent(s.id)}/config`))) }; }
+    // Не перечитываем данные, если они не обновлялись
+    if (prev && prev.cfg && prev.lastFetch === s.lastFetch && prev.stateAt === s.stateAt) return { ...s, cfg: prev.cfg };
+    const base = `api/switches/${encodeURIComponent(s.id)}`;
+    let cfg;
+    try { cfg = prepare(parseConfig(await apiCall('GET', `${base}/config`))); }
     catch (e) { return { ...s, cfg: null, loadError: e.message }; }
+    if (s.stateAt) {
+      try { attachState(cfg, await apiCall('GET', `${base}/state`)); } catch (e) { /* состояние необязательно */ }
+    }
+    return { ...s, cfg };
   }));
   fillSwitchSelect();
 }
@@ -889,6 +1004,7 @@ function renderAll() {
         <span><b>${cnt(c, 'access')}</b>рабочих мест</span>
         <span><b>${cnt(c, 'ap')}</b>Wi‑Fi</span>
         <span><b>${rangesSize(c.vlansDeclared)}</b>VLAN</span>
+        ${c.state ? `<span title="данные ${esc(ago(c.state.at))}"><b style="color:#2e8b57">${c.ports.filter(p => p.st && p.st.status === 'up').length}</b>up</span>` : ''}
         <span class="${hi ? 'sev-high' : ''}"><b>${hi}</b>важных</span>
         <span class="${med ? 'sev-med' : ''}"><b>${med}</b>внимание</span>
       </div>
@@ -944,6 +1060,90 @@ async function refresh(id) {
   selectSwitch(state.current);
 }
 
+/* ---------- поиск «где подключено устройство» ---------- */
+function findDevice(q) {
+  q = q.trim();
+  const sources = liveSources();
+  const isIp = /^\d{1,3}(\.\d{1,3}){1,3}\.?$/.test(q);
+  const hex = q.toLowerCase().replace(/[^0-9a-f]/g, '');
+  const isMac = !isIp && /^[0-9a-f.:\- ]+$/i.test(q) && hex.length >= 4;
+  const macHex = m => m.replace(/-/g, '');
+
+  const macs = new Set();
+  if (isIp) {
+    const full = /^\d+\.\d+\.\d+\.\d+$/.test(q);
+    for (const { cfg } of sources) for (const a of cfg.state.arp) if (full ? a.ip === q : a.ip.startsWith(q)) macs.add(a.mac);
+  } else if (isMac) {
+    for (const { cfg } of sources) {
+      for (const m of cfg.state.mac) if (macHex(m.mac).includes(hex)) macs.add(m.mac);
+      for (const a of cfg.state.arp) if (macHex(a.mac).includes(hex)) macs.add(a.mac);
+    }
+  }
+
+  const devices = [...macs].slice(0, 30).map(mac => {
+    const seen = [];
+    for (const { sw, cfg } of sources) for (const m of cfg.state.mac) {
+      if (m.mac !== mac) continue;
+      const p = cfg.ports.find(x => x.name === m.port);
+      // Порт, где MAC виден «транзитом»: аплинк, связь со свитчем или порт с множеством MAC
+      const transit = !p || ['uplink', 'link'].includes(p.role) || (p.lldp.length > 0 && p.macs.length > 3) || p.macs.length > 20;
+      seen.push({ sw, cfg, p, m, transit, count: p ? p.macs.length : 999 });
+    }
+    seen.sort((a, b) => a.transit - b.transit || a.count - b.count);
+    return { mac, ips: ipsForMac(mac), best: seen[0] && !seen[0].transit ? seen[0] : null, seen };
+  });
+
+  // Текстовый поиск: LLDP-соседи и описания портов
+  const text = [];
+  if (!isIp && !isMac && q.length >= 2) {
+    const ql = q.toLowerCase();
+    for (const { sw, cfg } of sources.length ? sources : (SERVER ? SWITCHES.filter(s => s.cfg).map(s => ({ sw: s, cfg: s.cfg })) : [{ sw: null, cfg: CFG }])) {
+      for (const p of cfg.ports) {
+        const n = (p.lldp || []).find(x => x.device.toLowerCase().includes(ql));
+        if (n) text.push({ sw, p, what: `LLDP: ${n.device}` });
+        else if ((p.desc || '').toLowerCase().includes(ql)) text.push({ sw, p, what: `описание: ${p.desc}` });
+      }
+    }
+  }
+  return { q, isIp, isMac, devices, text: text.slice(0, 50), sources };
+}
+
+function gotoLink(sw, p, label) {
+  return `<button class="plink" data-goto-sw="${esc(sw ? sw.id : '')}" data-goto-port="${esc(p.name)}">${esc(label || p.short)}</button>`;
+}
+
+function showFind(q) {
+  if (!q.trim()) return;
+  const r = findDevice(q);
+  const swName = sw => sw ? esc(sw.name) : '';
+  const loc = s => `${s.sw ? `<b>${swName(s.sw)}</b> · ` : ''}${s.p ? gotoLink(s.sw, s.p) : esc(s.m.port)} · VLAN ${s.m.vlan ?? '—'}${s.p && s.p.desc ? ` · <span class="muted">${esc(s.p.desc)}</span>` : ''}`;
+  const times = r.sources.map(s => `${s.sw ? s.sw.name + ': ' : ''}${ago(s.cfg.state.at)}`).join(', ');
+
+  let html = '';
+  if (!r.sources.length) {
+    html = '<p class="muted">Нет данных о состоянии портов. Нажмите «Обновить», чтобы забрать их с коммутаторов.</p>';
+  } else if (r.devices.length) {
+    html = r.devices.map(d => `<div class="find-item">
+      <div class="h"><span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
+      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">Конечный порт не найден — MAC виден только через аплинки${d.seen.length ? '' : ' (нет в таблицах MAC — есть только запись ARP)'}.</div>`}
+      ${d.seen.filter(s => s !== d.best).length ? `<details><summary class="muted">Также виден через ${d.seen.filter(s => s !== d.best).length}</summary>
+        ${d.seen.filter(s => s !== d.best).map(s => `<div class="muted" style="font-size:12.5px">${loc(s)}${s.p ? ' · ' + esc(ROLES[s.p.role].label.toLowerCase()) : ''}</div>`).join('')}</details>` : ''}
+    </div>`).join('');
+  } else if (r.text.length) {
+    html = r.text.map(t => `<div class="find-item"><div>${t.sw ? `<b>${swName(t.sw)}</b> · ` : ''}${gotoLink(t.sw, t.p)} ${liveBadge(t.p)}</div><div class="muted">${esc(t.what)}</div></div>`).join('');
+  } else {
+    html = `<p>Ничего не найдено по «${esc(q)}».</p>`;
+  }
+  html += `<p class="hint" style="margin-top:14px">Ищется по MAC (в любом формате, можно часть), IP или имени LLDP-соседа / описанию порта.
+    IP находится по таблице ARP — полнее всего, если в список добавлен коммутатор ядра (шлюз сети).${times ? ` Данные: ${esc(times)}.` : ''}</p>`;
+
+  $('#drawerTitle').textContent = `Поиск: ${q}`;
+  $('#drawerBody').innerHTML = html;
+  $('#drawer').classList.add('open');
+  $('#drawer').setAttribute('aria-hidden', 'false');
+  $('#scrim').hidden = false;
+}
+
 function setHash() {
   const h = SERVER ? (state.current === 'all' ? 'all' : `${state.current}/${state.tab}`) : state.tab;
   try { history.replaceState(null, '', '#' + h); } catch (e) { /* file:// в некоторых браузерах */ }
@@ -970,6 +1170,13 @@ function bind() {
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
 
   document.addEventListener('click', e => {
+    const gt = e.target.closest('[data-goto-port]');
+    if (gt) {
+      // Переход из результатов поиска: открыть коммутатор и порт
+      if (gt.dataset.gotoSw && gt.dataset.gotoSw !== state.current) selectSwitch(gt.dataset.gotoSw, 'overview');
+      openPort(gt.dataset.gotoPort);
+      return;
+    }
     const rs = e.target.closest('[data-refresh-sw]');
     if (rs) { refresh(rs.dataset.refreshSw); return; }
     const pl = e.target.closest('[data-port]');
@@ -1003,11 +1210,12 @@ function bind() {
 
   $('#swSelect').addEventListener('change', e => { selectSwitch(e.target.value); window.scrollTo(0, 0); });
   $('#refreshBtn').addEventListener('click', () => refresh(state.current));
+  $('#findInput').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); showFind(e.target.value); } });
 
   $('#panelVlan').addEventListener('change', e => { state.panelVlan = e.target.value; renderPanel(CFG); });
-  ['#portSearch', '#portMember', '#portRole', '#portVlan', '#portHideEmpty'].forEach(s => $(s).addEventListener('input', renderPortTable));
+  ['#portSearch', '#portMember', '#portRole', '#portVlan', '#portLive', '#portHideEmpty'].forEach(s => $(s).addEventListener('input', renderPortTable));
   $('#portReset').addEventListener('click', () => {
-    $('#portSearch').value = ''; $('#portMember').value = ''; $('#portRole').value = ''; $('#portVlan').value = ''; $('#portHideEmpty').checked = true;
+    $('#portSearch').value = ''; $('#portMember').value = ''; $('#portRole').value = ''; $('#portVlan').value = ''; $('#portLive').value = ''; $('#portHideEmpty').checked = true;
     state.profile = null; renderProfiles(CFG); renderPortTable();
   });
 
@@ -1075,7 +1283,7 @@ async function boot() {
   }
 
   SERVER = true;
-  ['#swSelect', '#refreshBtn', '#settingsLink'].forEach(s => { $(s).hidden = false; });
+  ['#swSelect', '#refreshBtn', '#settingsLink', '#findInput'].forEach(s => { $(s).hidden = false; });
   $('#fileBtn').hidden = true;
 
   let [id, tab] = hash.split('/');
