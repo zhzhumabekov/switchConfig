@@ -20,7 +20,7 @@ const HOST = '127.0.0.1';
 // Отдаём только эти файлы — конфиги с секретами и data/ наружу не попадают
 const STATIC = {
   '/': 'index.html', '/index.html': 'index.html', '/settings.html': 'settings.html',
-  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js',
+  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js', '/fixes.js': 'fixes.js',
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 

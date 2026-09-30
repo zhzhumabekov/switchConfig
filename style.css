@@ -415,3 +415,18 @@ a.btn { text-decoration: none; }
 .dl-add { background: rgba(46, 139, 87, .13); }
 .dl-del { background: rgba(200, 58, 50, .12); }
 @media (max-width: 640px) { .ev { grid-template-columns: 1fr; gap: 0; } .ev-i { display: none; } }
+
+/* ---------- готовые команды ---------- */
+.fix { margin-top: 10px; }
+.fix > summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 500; }
+.fix-v { margin-top: 10px; padding-left: 12px; border-left: 2px solid var(--border); }
+.fix-t { font-weight: 600; font-size: 13px; }
+.fix-n { color: var(--muted); font-size: 12.5px; margin: 4px 0 6px; }
+.fix-w { color: var(--sev-med); font-size: 12.5px; margin: 4px 0 6px; }
+.cmd-box { position: relative; margin-top: 6px; }
+.cmd { margin: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; padding-right: 110px;
+  font: 12.5px/1.55 var(--mono); overflow-x: auto; white-space: pre; max-height: 360px; }
+.copy-btn { position: absolute; top: 6px; right: 6px; }
+.port-tool { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.cmd-box, #tplOut { min-width: 0; }
+.port-tool select, .port-tool input { font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; width: 100%; }

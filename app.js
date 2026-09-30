@@ -74,7 +74,8 @@ function shortName(name) {
 }
 
 function classify(p) {
-  if (!p.lines.length) return 'empty';
+  // Порт без настроек (или только выключен) — не настроен
+  if (!p.lines.length || p.lines.every(l => l === 'shutdown')) return 'empty';
   const d = (p.desc || '').toLowerCase();
   if (/uplink|link_to_floor/.test(d)) return 'uplink';
   if (/link_to|downlink|link-to/.test(d)) return 'link';
@@ -286,6 +287,7 @@ function analyze(cfg) {
   }
   if (undeclared.size) {
     issues.push({
+      kind: 'vlan-undeclared', data: { vlans: [...undeclared.entries()].sort((a, b) => a[0] - b[0]).map(([v, ps]) => [v, [...ps].map(p => p.name)]) },
       sev: 'med', title: `VLAN разрешены на портах, но не созданы: ${[...undeclared.keys()].sort((a, b) => a - b).join(', ')}`,
       body: 'Трафик этих VLAN через коммутатор не пойдёт, пока VLAN не создан (vlan batch). Либо создайте VLAN, либо уберите его из allow-pass.',
       extra: [...undeclared.entries()].sort((a, b) => a[0] - b[0]).map(([v, ps]) =>
@@ -296,52 +298,52 @@ function analyze(cfg) {
   // 2. Vlanif без VLAN
   for (const vi of cfg.vlanifs) {
     if (vi.vlan !== 1 && !inRanges(cfg.vlansDeclared, vi.vlan) && !vi.shutdown) {
-      issues.push({ sev: 'high', title: `${vi.name} настроен, но VLAN ${vi.vlan} не создан`, body: `Интерфейс ${vi.ips.map(i => i.ip).join(', ')} не поднимется (down), пока нет VLAN ${vi.vlan} и порта, где он проходит.` });
+      issues.push({ kind: 'vlanif-novlan', data: { name: vi.name, vlan: vi.vlan, ips: vi.ips.map(i => i.ip) }, sev: 'high', title: `${vi.name} настроен, но VLAN ${vi.vlan} не создан`, body: `Интерфейс ${vi.ips.map(i => i.ip).join(', ')} не поднимется (down), пока нет VLAN ${vi.vlan} и порта, где он проходит.` });
     }
   }
 
   // 3. Маршруты с недостижимым next-hop
   const connected = cfg.vlanifs.flatMap(v => v.ips.map(i => ({ ...i, ifname: v.name })));
-  const badNh = {};
+  const badNh = {}, badRoutes = {};
   for (const r of cfg.routes) {
-    if (!connected.some(c => sameNet(r.nh, c.ip, c.mask))) (badNh[r.nh] ||= []).push(`${r.net}/${maskLen(r.mask)}`);
+    if (!connected.some(c => sameNet(r.nh, c.ip, c.mask))) { (badNh[r.nh] ||= []).push(`${r.net}/${maskLen(r.mask)}`); (badRoutes[r.nh] ||= []).push(r); }
   }
   for (const [nh, nets] of Object.entries(badNh)) {
-    issues.push({ sev: 'high', title: `Next-hop ${nh} не входит ни в одну подключённую подсеть`, body: `Маршруты ${nets.join(', ')} неактивны: на коммутаторе нет Vlanif в сети ${nh}. Скорее всего, это остаток прежней схемы.` });
+    issues.push({ kind: 'route-nh', data: { routes: badRoutes[nh] }, sev: 'high', title: `Next-hop ${nh} не входит ни в одну подключённую подсеть`, body: `Маршруты ${nets.join(', ')} неактивны: на коммутаторе нет Vlanif в сети ${nh}. Скорее всего, это остаток прежней схемы.` });
   }
 
   // 4. Loopback-detect на аплинках
   const lbdUp = active.filter(p => (p.role === 'uplink' || p.role === 'link') && p.lbd);
-  if (lbdUp.length) issues.push({ sev: 'med', title: 'Loopback-detect включён на аплинке', body: 'На магистральных портах обнаружение петель может заблокировать порт и отрезать этаж. Обычно его включают только на пользовательских портах.', ports: lbdUp });
+  if (lbdUp.length) issues.push({ kind: 'lbd-uplink', sev: 'med', title: 'Loopback-detect включён на аплинке', body: 'На магистральных портах обнаружение петель может заблокировать порт и отрезать этаж. Обычно его включают только на пользовательских портах.', ports: lbdUp });
 
   // 5. Порт конечного устройства без PVID
   const noPvid = active.filter(p => p.linkType === 'trunk' && p.pvid == null && ['printer', 'test', 'access'].includes(p.role));
-  if (noPvid.length) issues.push({ sev: 'med', title: 'Порты для устройств без PVID', body: 'Для транка без «port trunk pvid» PVID = 1. Нетегированный трафик принтера или ПК попадёт в VLAN 1, а не в нужный VLAN. Задайте pvid или переведите порт в режим access.', ports: noPvid });
+  if (noPvid.length) issues.push({ kind: 'no-pvid', sev: 'med', title: 'Порты для устройств без PVID', body: 'Для транка без «port trunk pvid» PVID = 1. Нетегированный трафик принтера или ПК попадёт в VLAN 1, а не в нужный VLAN. Задайте pvid или переведите порт в режим access.', ports: noPvid });
 
   // 6. Шаблон «port description desktop» на непользовательских портах
   const wrongDesc = active.filter(p => p.portDesc === 'desktop' && !['access'].includes(p.role));
-  if (wrongDesc.length) issues.push({ sev: 'info', title: '«port description desktop» на непользовательских портах', body: 'Похоже на массовую настройку по шаблону: описание не соответствует назначению порта.', ports: wrongDesc });
+  if (wrongDesc.length) issues.push({ kind: 'desc-desktop', sev: 'info', title: '«port description desktop» на непользовательских портах', body: 'Похоже на массовую настройку по шаблону: описание не соответствует назначению порта.', ports: wrongDesc });
 
   // 7. Непоследовательный loopback-detect на пользовательских портах
-  const acc = active.filter(p => p.role === 'access');
+  const acc = active.filter(p => p.role === 'access' && !p.shutdown);
   const accNoLbd = acc.filter(p => !p.lbd);
-  if (acc.length && accNoLbd.length && accNoLbd.length < acc.length) issues.push({ sev: 'info', title: `Loopback-detect включён не на всех пользовательских портах (${acc.length - accNoLbd.length} из ${acc.length})`, body: 'На остальных рабочих местах петля (например, кабель, воткнутый в два порта) не будет обнаружена.', ports: accNoLbd, collapse: true });
+  if (acc.length && accNoLbd.length && accNoLbd.length < acc.length) issues.push({ kind: 'lbd-missing', sev: 'info', title: `Loopback-detect включён не на всех пользовательских портах (${acc.length - accNoLbd.length} из ${acc.length})`, body: 'На остальных рабочих местах петля (например, кабель, воткнутый в два порта) не будет обнаружена.', ports: accNoLbd, collapse: true });
 
   // 8. Безопасность
   const con = cfg.ui.find(u => /^con/.test(u.name));
-  if (con && con.opts.includes('authentication-mode none')) issues.push({ sev: 'high', title: 'Консольный порт без аутентификации', body: 'user-interface con 0 → authentication-mode none. Любой человек с физическим доступом получает полный доступ к CLI.' });
+  if (con && con.opts.includes('authentication-mode none')) issues.push({ kind: 'console-noauth', data: { terminalUsers: Object.values(cfg.aaa.users).filter(u => u.services.includes('terminal')).map(u => u.name) }, sev: 'high', title: 'Консольный порт без аутентификации', body: 'user-interface con 0 → authentication-mode none. Любой человек с физическим доступом получает полный доступ к CLI.' });
   const vtyNoTo = cfg.ui.filter(u => u.opts.some(o => o === 'idle-timeout 0 0'));
-  if (vtyNoTo.length) issues.push({ sev: 'med', title: 'Сессии VTY никогда не закрываются по бездействию', body: `idle-timeout 0 0 на ${vtyNoTo.map(u => u.name).join(', ')}. Забытая сессия остаётся открытой бесконечно.` });
+  if (vtyNoTo.length) issues.push({ kind: 'vty-timeout', data: { lines: vtyNoTo.map(u => u.name) }, sev: 'med', title: 'Сессии VTY никогда не закрываются по бездействию', body: `idle-timeout 0 0 на ${vtyNoTo.map(u => u.name).join(', ')}. Забытая сессия остаётся открытой бесконечно.` });
   const telnetUsers = Object.values(cfg.aaa.users).filter(u => u.services.some(s => ['telnet', 'ftp', 'http'].includes(s)));
-  if (telnetUsers.length) issues.push({ sev: 'med', title: 'Разрешены незашифрованные протоколы управления', body: telnetUsers.map(u => `${u.name}: ${u.services.filter(s => ['telnet', 'ftp', 'http'].includes(s)).join(', ')}`).join('; ') + '. Логины и пароли передаются открытым текстом. Лучше оставить только ssh.' });
-  if (cfg.snmp.lines.some(l => /sys-info version.*\bv(1|2c)\b/.test(l))) issues.push({ sev: 'med', title: 'SNMP v1/v2c без шифрования', body: `Включены SNMP v1/v2c, v3 отключён. Настроено community: ${cfg.snmp.communities}. Community передаются открытым текстом, стоит ограничить доступ ACL или перейти на v3.` });
+  if (telnetUsers.length) issues.push({ kind: 'plain-proto', data: { users: telnetUsers.map(u => ({ name: u.name, services: u.services })) }, sev: 'med', title: 'Разрешены незашифрованные протоколы управления', body: telnetUsers.map(u => `${u.name}: ${u.services.filter(s => ['telnet', 'ftp', 'http'].includes(s)).join(', ')}`).join('; ') + '. Логины и пароли передаются открытым текстом. Лучше оставить только ssh.' });
+  if (cfg.snmp.lines.some(l => /sys-info version.*\bv(1|2c)\b/.test(l))) issues.push({ kind: 'snmp-v2', sev: 'med', title: 'SNMP v1/v2c без шифрования', body: `Включены SNMP v1/v2c, v3 отключён. Настроено community: ${cfg.snmp.communities}. Community передаются открытым текстом, стоит ограничить доступ ACL или перейти на v3.` });
 
   // 9. Созданные, но неиспользуемые VLAN
   const declaredList = [];
   for (const r of cfg.vlansDeclared) for (let v = r.from; v <= r.to && declaredList.length < 500; v++) declaredList.push(v);
   const narrow = active.filter(p => rangesSize(p.allowed) < 64);
   const unused = declaredList.filter(v => !narrow.some(p => carries(p, v)) && !cfg.vlanifs.some(vi => vi.vlan === v));
-  if (unused.length) issues.push({ sev: 'info', title: `VLAN созданы, но не назначены ни одному порту доступа: ${unused.join(', ')}`, body: 'Эти VLAN проходят только через широкий транк (например, 2–4094) или не используются вовсе.', extra: unused.map(v => vlanChip(v, cfg)).join(' ') });
+  if (unused.length) issues.push({ kind: 'vlan-unused', data: { vlans: unused }, sev: 'info', title: `VLAN созданы, но не назначены ни одному порту доступа: ${unused.join(', ')}`, body: 'Эти VLAN проходят только через широкий транк (например, 2–4094) или не используются вовсе.', extra: unused.map(v => vlanChip(v, cfg)).join(' ') });
 
   const order = { high: 0, med: 1, info: 2 };
   return issues.sort((a, b) => order[a.sev] - order[b.sev]);
@@ -381,11 +383,11 @@ function attachState(cfg, st) {
   // Замечания по текущему состоянию
   const ports = cfg.ports.filter(p => p.st);
   const loop = ports.filter(p => p.st.status === 'lbdt');
-  if (loop.length) cfg.issues.push({ sev: 'high', live: true, title: 'Порт заблокирован из-за петли', body: 'Loopback-detect обнаружил петлю и выключил порт (#down). Найдите кабель, который замыкает сеть (например, воткнут в два порта), и уберите его.', ports: loop });
+  if (loop.length) cfg.issues.push({ kind: 'loop', sev: 'high', live: true, title: 'Порт заблокирован из-за петли', body: 'Loopback-detect обнаружил петлю и выключил порт (#down). Найдите кабель, который замыкает сеть (например, воткнут в два порта), и уберите его.', ports: loop });
   const upDown = ports.filter(p => ['uplink', 'link'].includes(p.role) && p.st.status !== 'up');
-  if (upDown.length) cfg.issues.push({ sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
+  if (upDown.length) cfg.issues.push({ kind: 'uplink-down', sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
   const errs = ports.filter(p => p.st.inErr + p.st.outErr > 0);
-  if (errs.length) cfg.issues.push({ sev: 'med', live: true, title: 'Ошибки на портах', body: 'Счётчики inErrors/outErrors не нулевые: возможна плохая линия, кабель или несогласованная скорость/дуплекс.', ports: errs });
+  if (errs.length) cfg.issues.push({ kind: 'port-errors', sev: 'med', live: true, title: 'Ошибки на портах', body: 'Счётчики inErrors/outErrors не нулевые: возможна плохая линия, кабель или несогласованная скорость/дуплекс.', ports: errs });
   const order = { high: 0, med: 1, info: 2 };
   cfg.issues.sort((a, b) => order[a.sev] - order[b.sev]);
   return cfg;
@@ -910,6 +912,7 @@ function renderIssues(cfg) {
     <div class="ib">${esc(i.body)}</div>
     ${i.ports ? `<div class="ip">${i.collapse && i.ports.length > 12 ? `<span class="mono muted">${esc(compressPorts(i.ports))}</span>` : i.ports.map(p => `${portLink(p)}${p.desc ? ` <span class="muted">${esc(p.desc)}</span>` : ''}`).join('<span class="muted">·</span>')}</div>` : ''}
     ${i.extra ? `<div class="ip" style="flex-direction:column">${i.extra}</div>` : ''}
+    ${fixHtml(i, cfg)}
   </div>`).join('') || '<div class="card">Замечаний нет.</div>';
 }
 
@@ -955,6 +958,7 @@ function openPort(name) {
     ${CFG.state ? livePortHtml(p) : ''}
     ${SERVER && state.current && state.current !== 'all' ? portHistoryHtml(state.current, p.name) : ''}
     ${issues.length ? `<div class="sub">Замечания</div>${issues.map(i => `<div class="issue sev-${i.sev}" style="padding:8px 12px"><div class="it">${esc(i.title)}</div></div>`).join('')}` : ''}
+    ${portToolHtml(p)}
     <div class="sub">Конфигурация</div>
     <pre>interface ${esc(p.name)}${p.lines.length ? '\n' + esc(p.lines.map(l => ' ' + l).join('\n')) : '\n <span class="muted"># нет настроек</span>'}</pre>
     ${same.length ? `<div class="sub">Такие же настройки ещё у ${same.length} ${plural(same.length, 'порта', 'портов', 'портов')}</div><div class="mono muted" style="font-size:12px">${esc(compressPorts(same))}</div>` : '<div class="sub">Уникальная конфигурация</div>'}
@@ -962,6 +966,7 @@ function openPort(name) {
   $('#drawer').classList.add('open');
   $('#drawer').setAttribute('aria-hidden', 'false');
   $('#scrim').hidden = false;
+  updatePortTool();
 }
 function livePortHtml(p) {
   const st = p.st;
@@ -979,6 +984,63 @@ function livePortHtml(p) {
       ${macs.slice(0, MAX).map(m => { const d = deviceInfo(m.mac); return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${DIR ? `<td>${d.name ? deviceLabel(d, false) + (d.os || d.ou ? `<div class="muted" style="font-size:12px">${esc([d.os, d.ou].filter(Boolean).join(' · '))}</div>` : '') + (d.description ? `<div class="muted" style="font-size:12px">${esc(d.description)}</div>` : '') : '<span class="flag warn">неизвестно</span>'}</td>` : ''}</tr>`; }).join('')}
     </tbody></table>${macs.length > MAX ? `<div class="muted" style="margin-top:6px">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`
     : '<div class="muted">Нет выученных MAC-адресов.</div>'}`;
+}
+
+/* ---------- готовые команды (этап 3) ---------- */
+function cmdBox(text) {
+  return `<div class="cmd-box"><pre class="cmd">${esc(text)}</pre><button class="btn small copy-btn" data-copy>Копировать</button></div>`;
+}
+
+function fixHtml(issue, cfg) {
+  if (typeof Fixes === 'undefined') return '';
+  const vs = Fixes.forIssue(issue, cfg);
+  if (!vs || !vs.length) return '';
+  return `<details class="fix"><summary>Как исправить</summary>${vs.map(v => `<div class="fix-v">
+      <div class="fix-t">${esc(v.title)}</div>
+      ${v.note ? `<p class="fix-n">${esc(v.note)}</p>` : ''}
+      ${v.warn ? `<p class="fix-w">⚠ ${esc(v.warn)}</p>` : ''}
+      ${v.commands ? cmdBox(v.commands) : '<p class="muted">Команды не нужны.</p>'}
+    </div>`).join('')}</details>`;
+}
+
+let PORT_TOOL = null; // { p, templates }
+function portToolHtml(p) {
+  if (typeof Fixes === 'undefined' || !CFG.profiles) return '';
+  const templates = Fixes.portTemplates(CFG);
+  PORT_TOOL = { p, templates };
+  return `<div class="sub">Команды для порта</div>
+    <div class="port-tool">
+      <label class="field">Сделать порт
+        <select id="tplSelect"><option value="">— только изменить описание —</option>${templates.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join('')}</select>
+      </label>
+      <label class="field">Описание (description)
+        <input id="tplDesc" value="${esc(p.desc || '')}" placeholder="например, PC-BUH-012 room-305" maxlength="200">
+      </label>
+      <div id="tplBasis" class="muted" style="font-size:12px"></div>
+      <div id="tplOut"></div>
+    </div>`;
+}
+
+function updatePortTool() {
+  if (!PORT_TOOL || !$('#tplOut')) return;
+  const { p, templates } = PORT_TOOL;
+  const tpl = templates.find(t => t.id === $('#tplSelect').value) || { special: 'none' };
+  const desc = $('#tplDesc').value.trim().replace(/\s+/g, ' ');
+  $('#tplBasis').textContent = tpl.basis ? `Шаблон: ${tpl.basis} на этом коммутаторе.` : '';
+  const cmds = tpl.special === 'none' ? (desc !== (p.desc || '') ? Fixes.portCommands(p, { special: 'desc' }, desc) : '') : Fixes.portCommands(p, tpl, desc);
+  const nonAscii = /[^\x20-\x7e]/.test(desc) ? '<p class="fix-w">⚠ В описании есть символы не латиницей — многие коммутаторы Huawei их не принимают или показывают неверно. Лучше использовать латиницу.</p>' : '';
+  $('#tplOut').innerHTML = cmds
+    ? cmdBox(cmds) + nonAscii + '<p class="fix-n">Команды только показываются — выполните их на коммутаторе сами, проверьте результат и сохраните командой <code>save</code>.</p>'
+    : '<p class="muted" style="margin:6px 0 0">Порт уже настроен так — команды не нужны.</p>';
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  }
 }
 
 function closeDrawer() {
@@ -1451,7 +1513,16 @@ function cfgFor(el) {
 function bind() {
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
 
+  $('#drawerBody').addEventListener('change', e => { if (e.target.id === 'tplSelect') updatePortTool(); });
+  $('#drawerBody').addEventListener('input', e => { if (e.target.id === 'tplDesc') updatePortTool(); });
+
   document.addEventListener('click', e => {
+    const cp = e.target.closest('[data-copy]');
+    if (cp) {
+      const text = cp.closest('.cmd-box').querySelector('pre').textContent;
+      copyText(text).then(ok => toast(ok ? 'Команды скопированы' : 'Не удалось скопировать — выделите текст вручную', ok ? 'ok' : 'err'));
+      return;
+    }
     const gt = e.target.closest('[data-goto-port]');
     if (gt) {
       // Переход из результатов поиска: открыть коммутатор и порт
