@@ -34,6 +34,7 @@
     <button data-tab="l3">L3 и маршруты</button>
     <button data-tab="services">Сервисы</button>
     <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="standard" id="standardTabBtn" hidden>Эталон <span class="count" id="stdCount"></span></button>
     <button data-tab="history" id="historyTabBtn" hidden>История</button>
     <button data-tab="raw">Исходник</button>
   </nav>
@@ -52,6 +53,13 @@
       <div id="allEvents"></div>
     </div>
     <div class="sw-grid" id="swGrid"></div>
+    <div class="card" id="allStdCard" hidden>
+      <div class="card-head">
+        <h2>Соответствие эталону</h2>
+        <button class="btn small" data-std-edit>Изменить эталон</button>
+      </div>
+      <div class="table-scroll"><table class="tbl" id="stdMatrix"></table></div>
+    </div>
     <div class="card" id="allUnknownCard" hidden>
       <h2>Неизвестные устройства <span class="count" id="allUnknownCount"></span></h2>
       <p class="hint">MAC-адреса на пользовательских портах всех коммутаторов, которых нет в DHCP, AD и DNS, а также компьютеры, отключённые в AD. Нажмите на строку, чтобы открыть порт.</p>
@@ -172,6 +180,20 @@
     <div id="issuesList"></div>
   </section>
 
+  <!-- ЭТАЛОН -->
+  <section class="tab" id="tab-standard" hidden>
+    <div class="card" id="stdSummary"></div>
+    <div class="card" id="stdRulesCard" hidden>
+      <h2>Общие настройки</h2>
+      <div id="stdRules"></div>
+    </div>
+    <div class="card" id="stdPortsCard" hidden>
+      <h2>Порты, настроенные не по эталону</h2>
+      <p class="hint">Порт сравнивается с шаблоном своей роли: рабочее место, принтер или точка доступа. Выключенные порты и порты других ролей (аплинки, тестовые) не проверяются.</p>
+      <div id="stdPorts"></div>
+    </div>
+  </section>
+
   <!-- ИСТОРИЯ -->
   <section class="tab" id="tab-history" hidden>
     <div class="card">
@@ -235,6 +257,7 @@
 <script src="config.js"></script>
 <script src="diff.js"></script>
 <script src="fixes.js"></script>
+<script src="standard.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -430,3 +430,27 @@ a.btn { text-decoration: none; }
 .port-tool { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .cmd-box, #tplOut { min-width: 0; }
 .port-tool select, .port-tool input { font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; width: 100%; }
+
+/* ---------- эталон ---------- */
+.std-sum { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.std-sum .grow { flex: 1; min-width: 200px; }
+.std-pct { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 84px; }
+.std-pct.small { font-size: 14px; min-width: 0; }
+.std-pct.ok { color: #2e8b57; }
+.std-pct.mid { color: var(--sev-med); }
+.std-pct.bad { color: var(--sev-high); }
+.std-rules { list-style: none; margin: 0; padding: 0; }
+.std-rules li { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.std-rules li:last-child { border-bottom: 0; }
+.std-rules .mark { width: 16px; font-weight: 700; }
+.std-rules li.ok .mark { color: #2e8b57; }
+.std-rules li.bad .mark { color: var(--sev-high); }
+.std-rules .grow { flex: 1; min-width: 0; }
+.std-group { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
+.chg { display: inline-block; font: 11.5px var(--mono); padding: 1px 6px; border-radius: 4px; margin: 2px 4px 2px 0; }
+.chg-add { background: rgba(46, 139, 87, .13); color: #2e8b57; }
+.chg-del { background: rgba(200, 58, 50, .12); color: var(--sev-high); }
+.std-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.std-form textarea, .std-form .field input { font: 12.5px/1.5 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; resize: vertical; }
+.std-form .chk { color: var(--text); }
+.row-chk { display: flex; gap: 14px; }

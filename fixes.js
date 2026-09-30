@@ -219,7 +219,7 @@
     return lines.length ? sys(iface(p.name, lines)) : '';
   }
 
-  const api = { forIssue, portTemplates, portChange, portCommands, vrpList, undoOf, modelOf };
+  const api = { forIssue, portTemplates, portChange, portCommands, vrpList, undoOf, modelOf, sys, iface };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.Fixes = api;
 })(typeof window !== 'undefined' ? window : globalThis);

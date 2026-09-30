@@ -548,7 +548,8 @@ function render(cfg, sw = null) {
   renderIssues(cfg);
   renderRaw(cfg);
   renderHistory(sw);
-  showTab(state.tab === 'all' || (state.tab === 'history' && !sw) ? 'overview' : state.tab);
+  renderStandard(cfg, sw);
+  showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) ? 'overview' : state.tab);
 }
 
 function ago(iso) {
@@ -1081,6 +1082,7 @@ async function loadSwitches() {
   try { DIR = buildDirectory(await apiCall('GET', 'api/directory')); } catch (e) { DIR = null; }
   try { EVENTS = await apiCall('GET', 'api/events?limit=300'); } catch (e) { EVENTS = []; }
   try { DEVICES = await apiCall('GET', 'api/devices'); } catch (e) { DEVICES = null; }
+  try { const st = await apiCall('GET', 'api/standard'); STD = st && st.ports ? st : null; } catch (e) { STD = null; }
   pollSig = sigOf(list);
   const old = new Map(SWITCHES.map(s => [s.id, s]));
   SWITCHES = await Promise.all(list.map(async s => {
@@ -1185,6 +1187,9 @@ function renderAll() {
       <div class="panel-scroll mini">${panelHtml(c, true)}</div>
     </div>`;
   }).join('');
+
+  // Соответствие эталону
+  renderStdMatrix(withCfg);
 
   // Последние события
   const evShown = EVENTS.slice(0, 30);
@@ -1488,6 +1493,170 @@ async function poll() {
   } catch (e) { /* сервер недоступен — попробуем позже */ }
 }
 
+/* ---------- эталон (этап 4) ---------- */
+let STD = null;
+
+const splitLines = v => String(v || '').split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+
+function changeChips(lines) {
+  return lines.slice(0, 6).map(l => /^undo /.test(l)
+    ? `<span class="chg chg-del">− ${esc(l.slice(5))}</span>`
+    : `<span class="chg chg-add">+ ${esc(l)}</span>`).join('') + (lines.length > 6 ? ` <span class="muted">и ещё ${lines.length - 6}</span>` : '');
+}
+
+function renderStandard(cfg, sw) {
+  const on = SERVER && !!sw && typeof Standard !== 'undefined';
+  $('#standardTabBtn').hidden = !on;
+  if (!on) return;
+  if (!STD) {
+    $('#stdCount').textContent = '';
+    $('#stdSummary').innerHTML = `<h2>Эталон ещё не задан</h2>
+      <p class="hint">Эталон — это то, как должны быть настроены порты каждого типа и общие параметры (NTP, syslog, SNMP, SSH, доступ к консоли). Он один для всех коммутаторов.
+      Проще всего взять за основу этот коммутатор: порты — по самой частой настройке, общие параметры — как сейчас, плюс рекомендуемые правила безопасности. Потом его можно поправить.</p>
+      <button class="btn primary" data-std-create>Создать эталон на основе ${esc(sw.name)}</button>`;
+    $('#stdRulesCard').hidden = $('#stdPortsCard').hidden = true;
+    return;
+  }
+  const rep = Standard.check(cfg, STD);
+  const pct = Standard.score(rep);
+  const bad = rep.rules.filter(r => !r.ok).length + rep.portGroups.reduce((n, g) => n + g.ports.length, 0);
+  $('#stdCount').textContent = bad || '';
+  $('#stdSummary').innerHTML = `<div class="std-sum">
+      <div class="std-pct ${pct === 100 ? 'ok' : pct >= 80 ? 'mid' : 'bad'}">${pct}%</div>
+      <div class="grow">
+        <div><b>Соответствие эталону</b> <span class="muted">· эталон от ${esc(fmtTime(STD.updatedAt))}${STD.createdFrom ? `, основа — ${esc(STD.createdFrom)}` : ''}</span></div>
+        <div class="muted">Общие настройки: ${rep.totals.rulesOk} из ${rep.totals.rules} · порты: ${rep.totals.portsOk} из ${rep.totals.ports} по эталону</div>
+      </div>
+      <button class="btn small" data-std-edit>Изменить эталон</button>
+    </div>
+    ${rep.allCommands ? `<details class="fix"><summary>Все исправления одним блоком</summary><p class="fix-n">Сначала просмотрите отдельные пункты ниже — особенно предупреждения.</p>${cmdBox(rep.allCommands)}</details>` : '<p class="muted" style="margin:10px 0 0">Коммутатор полностью соответствует эталону.</p>'}`;
+
+  $('#stdRulesCard').hidden = !rep.rules.length;
+  $('#stdRules').innerHTML = `<ul class="std-rules">${rep.rules.map(r => `<li class="${r.ok ? 'ok' : 'bad'}">
+      <span class="mark">${r.ok ? '✓' : '✗'}</span>
+      <div class="grow"><b>${esc(r.label)}</b>${r.detail ? ` <span class="muted">— ${esc(r.detail)}</span>` : ''}
+        ${!r.ok && r.commands ? `<details class="fix"><summary>Как исправить</summary>${r.warn ? `<p class="fix-w">⚠ ${esc(r.warn)}</p>` : ''}${cmdBox(r.commands)}</details>` : ''}
+      </div></li>`).join('')}</ul>`;
+
+  $('#stdPortsCard').hidden = !rep.totals.ports;
+  $('#stdPorts').innerHTML = rep.portGroups.length ? rep.portGroups.map(g => `<div class="std-group">
+      <div><b>${g.ports.length} ${plural(g.ports.length, 'порт', 'порта', 'портов')}</b> · ${esc(g.label)}</div>
+      <div class="mono muted" style="font-size:12px;margin:2px 0 6px">${esc(compressPorts(g.ports))}</div>
+      <div>${changeChips(g.change)}</div>
+      <details class="fix"><summary>Команды</summary>${cmdBox(g.commands)}</details>
+    </div>`).join('') : `<p class="muted" style="margin:0">Все ${rep.totals.ports} проверенных портов настроены по эталону.</p>`;
+}
+
+function renderStdMatrix(withCfg) {
+  const on = typeof Standard !== 'undefined' && withCfg.length;
+  $('#allStdCard').hidden = !on;
+  if (!on) return;
+  if (!STD) {
+    $('#stdMatrix').innerHTML = '<tbody><tr><td class="muted">Эталон ещё не задан. Откройте коммутатор, который считаете образцовым, вкладка «Эталон» → «Создать эталон».</td></tr></tbody>';
+    return;
+  }
+  $('#stdMatrix').innerHTML = `<thead><tr><th>Коммутатор</th><th>Соответствие</th><th>Общие настройки</th><th>Порты</th><th>Главное</th></tr></thead><tbody>` +
+    withCfg.map(s => {
+      const rep = Standard.check(s.cfg, STD), pct = Standard.score(rep);
+      const main = [...rep.rules.filter(r => !r.ok).map(r => r.label), ...rep.portGroups.slice(0, 1).map(g => `${g.ports.length} портов «${g.label}»`)].slice(0, 3);
+      return `<tr data-open-sw="${esc(s.id)}" data-open-tab="standard">
+        <td><b>${esc(s.name)}</b></td>
+        <td><span class="std-pct small ${pct === 100 ? 'ok' : pct >= 80 ? 'mid' : 'bad'}">${pct}%</span></td>
+        <td>${rep.totals.rulesOk} / ${rep.totals.rules}</td>
+        <td>${rep.totals.portsOk} / ${rep.totals.ports}</td>
+        <td class="muted">${esc(main.join(' · ')) || '—'}</td></tr>`;
+    }).join('') + '</tbody>';
+}
+
+function openStdEditor(std) {
+  if (!std) {
+    if (!CFG) { toast('Откройте коммутатор, чтобы создать эталон на его основе', 'err'); return; }
+    std = Standard.derive(CFG, (SWITCHES.find(x => x.id === state.current) || {}).name);
+  }
+  const tplBlock = id => `<label class="chk"><input type="checkbox" name="p_${id}_on"> <b>${esc(Standard.TPL_LABEL[id])}</b></label>
+    <textarea name="p_${id}" rows="6" spellcheck="false" placeholder="команды интерфейса, по одной в строке"></textarea>`;
+  $('#drawerTitle').textContent = 'Эталон';
+  $('#drawerBody').innerHTML = `<form id="stdForm" class="std-form">
+    <p class="hint">Один эталон для всех коммутаторов. Пустое поле или снятая галочка — правило не проверяется.</p>
+    <div class="sub">Шаблоны портов</div>
+    <p class="hint">Команды внутри interface, без description. Порт сравнивается с шаблоном своей роли.</p>
+    ${['workstation', 'printer', 'ap'].map(tplBlock).join('')}
+    <div class="sub">Общие настройки</div>
+    <label class="field">NTP-серверы (все должны быть настроены)<textarea name="ntpServers" rows="3" spellcheck="false"></textarea></label>
+    <label class="field">Серверы журналов (info-center loghost)<textarea name="syslogHosts" rows="2" spellcheck="false"></textarea></label>
+    <div class="field">Разрешённые версии SNMP
+      <span class="row-chk"><label class="chk"><input type="checkbox" name="snmp_v1"> v1</label><label class="chk"><input type="checkbox" name="snmp_v2c"> v2c</label><label class="chk"><input type="checkbox" name="snmp_v3"> v3</label></span>
+    </div>
+    <label class="chk"><input type="checkbox" name="snmpTrap"> SNMP-трапы включены</label>
+    <label class="chk"><input type="checkbox" name="sshRequired"> SSH-сервер включён</label>
+    <label class="chk"><input type="checkbox" name="telnetForbidden"> Telnet запрещён (сервер и service-type)</label>
+    <label class="chk"><input type="checkbox" name="vtyAaa"> Вход по VTY через AAA</label>
+    <label class="field">Таймаут VTY-сессии не больше (мин)<input name="vtyIdleMax" type="number" min="1" max="600" placeholder="пусто — не проверять"></label>
+    <label class="chk"><input type="checkbox" name="consoleAuth"> Пароль на консольном порту</label>
+    <label class="chk"><input type="checkbox" name="lldp"> LLDP включён</label>
+    <label class="field">Часовой пояс (строка конфигурации)<input name="timezone" spellcheck="false" placeholder="clock timezone ..."></label>
+    <label class="field">Обязательные строки (верхнего уровня, по одной в строке)<textarea name="requiredLines" rows="3" spellcheck="false"></textarea></label>
+    <label class="field">Запрещённые строки (начало строки, по одной в строке)<textarea name="forbiddenLines" rows="3" spellcheck="false"></textarea></label>
+    <div class="form-actions">
+      <button type="submit" class="btn primary">Сохранить эталон</button>
+      ${CFG ? '<button type="button" class="btn" data-std-fill>Заполнить из текущего коммутатора</button>' : ''}
+      <button type="button" class="btn ghost" data-std-cancel>Отмена</button>
+      <span class="form-status" id="stdStatus"></span>
+    </div>
+  </form>`;
+  fillStdForm(std);
+  $('#drawer').classList.add('open');
+  $('#drawer').setAttribute('aria-hidden', 'false');
+  $('#scrim').hidden = false;
+}
+
+function fillStdForm(std) {
+  const f = $('#stdForm').elements;
+  $('#stdForm').dataset.source = std.createdFrom || '';
+  for (const id of ['workstation', 'printer', 'ap']) {
+    const t = (std.ports || {})[id] || { enabled: false, lines: [] };
+    f['p_' + id + '_on'].checked = !!t.enabled;
+    f['p_' + id].value = (t.lines || []).join('\n');
+  }
+  const g = std.global || {};
+  f.ntpServers.value = (g.ntpServers || []).join('\n');
+  f.syslogHosts.value = (g.syslogHosts || []).join('\n');
+  for (const v of ['v1', 'v2c', 'v3']) f['snmp_' + v].checked = (g.snmpAllowed || []).includes(v);
+  for (const k of ['snmpTrap', 'sshRequired', 'telnetForbidden', 'vtyAaa', 'consoleAuth', 'lldp']) f[k].checked = !!g[k];
+  f.vtyIdleMax.value = g.vtyIdleMax || '';
+  f.timezone.value = g.timezone || '';
+  f.requiredLines.value = (g.requiredLines || []).join('\n');
+  f.forbiddenLines.value = (g.forbiddenLines || []).join('\n');
+}
+
+async function saveStdForm() {
+  const form = $('#stdForm'), f = form.elements;
+  const lines = v => String(v || '').split('\n').map(x => x.trim()).filter(Boolean);
+  const std = {
+    version: 1,
+    createdFrom: form.dataset.source || (STD && STD.createdFrom) || '',
+    ports: Object.fromEntries(['workstation', 'printer', 'ap'].map(id => [id, { enabled: f['p_' + id + '_on'].checked, lines: lines(f['p_' + id].value).filter(l => !/^description /.test(l)) }])),
+    global: {
+      ntpServers: splitLines(f.ntpServers.value), syslogHosts: splitLines(f.syslogHosts.value),
+      snmpAllowed: ['v1', 'v2c', 'v3'].filter(v => f['snmp_' + v].checked),
+      snmpTrap: f.snmpTrap.checked, sshRequired: f.sshRequired.checked, telnetForbidden: f.telnetForbidden.checked,
+      vtyAaa: f.vtyAaa.checked, vtyIdleMax: f.vtyIdleMax.value ? Math.max(1, Math.round(+f.vtyIdleMax.value)) : null,
+      consoleAuth: f.consoleAuth.checked, lldp: f.lldp.checked, timezone: f.timezone.value.trim(),
+      requiredLines: lines(f.requiredLines.value), forbiddenLines: lines(f.forbiddenLines.value),
+    },
+  };
+  $('#stdStatus').textContent = 'Сохраняю…';
+  try {
+    STD = await apiCall('PUT', 'api/standard', std);
+    closeDrawer();
+    toast('Эталон сохранён', 'ok');
+    selectSwitch(state.current, state.current === 'all' ? undefined : 'standard');
+  } catch (e) {
+    $('#stdStatus').textContent = e.message;
+    $('#stdStatus').className = 'form-status err';
+  }
+}
+
 function setHash() {
   const h = SERVER ? (state.current === 'all' ? 'all' : `${state.current}/${state.tab}`) : state.tab;
   try { history.replaceState(null, '', '#' + h); } catch (e) { /* file:// в некоторых браузерах */ }
@@ -1514,9 +1683,14 @@ function bind() {
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
 
   $('#drawerBody').addEventListener('change', e => { if (e.target.id === 'tplSelect') updatePortTool(); });
+  $('#drawerBody').addEventListener('submit', e => { if (e.target.id === 'stdForm') { e.preventDefault(); saveStdForm(); } });
   $('#drawerBody').addEventListener('input', e => { if (e.target.id === 'tplDesc') updatePortTool(); });
 
   document.addEventListener('click', e => {
+    if (e.target.closest('[data-std-edit]')) { openStdEditor(STD); return; }
+    if (e.target.closest('[data-std-create]')) { openStdEditor(Standard.derive(CFG, (SWITCHES.find(x => x.id === state.current) || {}).name)); return; }
+    if (e.target.closest('[data-std-fill]')) { if (CFG) fillStdForm(Standard.derive(CFG, (SWITCHES.find(x => x.id === state.current) || {}).name)); return; }
+    if (e.target.closest('[data-std-cancel]')) { closeDrawer(); return; }
     const cp = e.target.closest('[data-copy]');
     if (cp) {
       const text = cp.closest('.cmd-box').querySelector('pre').textContent;

@@ -14,13 +14,14 @@ const history = require('./history');
 const scheduler = require('./scheduler');
 const { redact } = require('./update-config');
 
+const STANDARD = path.join(__dirname, 'data', 'standard.json');
 const PORT = +process.env.PORT || 8080;
 const HOST = '127.0.0.1';
 
 // Отдаём только эти файлы — конфиги с секретами и data/ наружу не попадают
 const STATIC = {
   '/': 'index.html', '/index.html': 'index.html', '/settings.html': 'settings.html',
-  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js', '/fixes.js': 'fixes.js',
+  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js', '/fixes.js': 'fixes.js', '/standard.js': 'standard.js',
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
@@ -145,6 +146,24 @@ async function api(req, res, parts) {
   }
 
   if (res1 === 'devices' && method === 'GET') return send(res, 200, history.loadDevices());
+
+  if (res1 === 'standard') {
+    if (method === 'GET') {
+      try { return send(res, 200, JSON.parse(fs.readFileSync(STANDARD, 'utf8'))); } catch { return send(res, 200, {}); }
+    }
+    if (method === 'PUT') {
+      const b = await readBody(req);
+      const okList = v => Array.isArray(v) && v.every(x => typeof x === 'string' && x.length <= 300);
+      if (!b || typeof b !== 'object' || !b.ports || !b.global) throw new HttpError(400, 'Некорректный эталон');
+      for (const t of Object.values(b.ports)) if (!okList(t.lines || [])) throw new HttpError(400, 'Некорректные строки шаблона порта');
+      for (const k of ['ntpServers', 'syslogHosts', 'snmpAllowed', 'requiredLines', 'forbiddenLines']) {
+        if (b.global[k] !== undefined && !okList(b.global[k])) throw new HttpError(400, `Некорректное поле ${k}`);
+      }
+      b.updatedAt = new Date().toISOString();
+      fs.writeFileSync(STANDARD, JSON.stringify(b, null, 2));
+      return send(res, 200, b);
+    }
+  }
 
   if (res1 === 'schedule') {
     if (method === 'GET') return send(res, 200, scheduler.status());
