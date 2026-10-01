@@ -450,6 +450,11 @@ function attachState(cfg, st) {
         body: `Всего изменений: ${stp.tcCount}. Последнее пришло через ${tp ? tp.short + (tp.desc ? ' (' + tp.desc + ')' : '') : (stp.lastTcPort || '—')}.`, ports: tp ? [tp] : undefined });
     }
   }
+  for (const f of ((st.log && st.log.findings) || []).filter(x => x.sev !== 'info')) {
+    const port = f.port && cfg.ports.find(x => x.name === f.port);
+    cfg.issues.push({ kind: 'log', data: { commands: f.commands, advice: f.advice, warn: f.warn }, sev: f.sev, live: true,
+      title: `Журнал: ${f.title}`, body: f.detail, ports: port ? [port] : undefined });
+  }
   for (const pr of (st.hw && st.hw.problems) || []) {
     const port = pr.port && cfg.ports.find(x => x.name === pr.port);
     cfg.issues.push({ kind: 'hw', data: { key: pr.key, cmd: pr.cmd }, sev: pr.sev, live: true, title: pr.text,
@@ -629,6 +634,7 @@ function render(cfg, sw = null) {
   renderStandard(cfg, sw);
   renderHardware(cfg, sw);
   renderStp(cfg, sw);
+  renderLog(cfg, sw);
   showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) || (state.tab === 'hw' && $('#hwTabBtn').hidden) ? 'overview' : state.tab);
 }
 
@@ -1295,6 +1301,7 @@ function renderAll() {
   renderMap(withCfg);
   renderHwTable(withCfg);
   renderStpAll(withCfg);
+  renderLogAll(withCfg);
 
   // Соответствие эталону
   renderStdMatrix(withCfg);
@@ -1473,7 +1480,7 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️', 'stp-root': '🌳', 'stp-rootport': '🌿',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️', 'stp-root': '🌳', 'stp-rootport': '🌿', log: '📜',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
@@ -1484,6 +1491,7 @@ const EV_GROUPS = {
   hardware: e => ['hw', 'hw-ok'].includes(e.type),
   backup: e => ['backup', 'restore', 'restore-undo'].includes(e.type),
   stp: e => ['stp-root', 'stp-rootport'].includes(e.type),
+  log: e => e.type === 'log',
 };
 
 function fmtTime(iso) {
@@ -2009,6 +2017,84 @@ function updateNewPhoneCmds() {
   $('#newPhOut').innerHTML = (errors.length ? `<p class="fix-w">✗ ${errors.map(esc).join('<br>✗ ')}</p>` : '') +
     v.warnings.map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('') +
     (r ? cmdBox(r.commands) + '<p class="fix-n">Выполните на роутере и сохраните: <code>write memory</code>. Телефон зарегистрируется после подключения к сети (для 79xx может понадобиться прошивка на TFTP).</p>' : '');
+}
+
+/* ---------- журнал коммутатора ---------- */
+const LOG_LEVELS = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'];
+
+function renderLog(cfg, sw) {
+  const lg = cfg.state && cfg.state.log;
+  $('#logTabBtn').hidden = !lg;
+  if (!lg) return;
+  const fs = lg.findings || [];
+  $('#logCount').textContent = fs.filter(f => f.sev !== 'info').length || '';
+  const ownIps = new Set(cfg.vlanifs.flatMap(v => v.ips.map(i => i.ip)));
+  const m = lg.meta || {};
+  const lvl = lg.byLevel || [];
+  $('#logSummary').innerHTML = `<div class="std-sum">
+      <div class="grow"><b>Журнал коммутатора</b> <span class="muted">· ${lg.count} записей${lg.first ? ` с ${esc(lg.first)} по ${esc(lg.last)}` : ''}</span>
+        <div class="muted" style="font-size:12.5px">${m.overwritten ? `Буфер вмещает ${m.maxSize || m.size || '?'} ${plural(m.maxSize || m.size || 0, 'запись', 'записи', 'записей')}, ${m.overwritten} старых уже перезаписаны — более ранние события не видны. ` : ''}Данные ${esc(ago(cfg.state.at))}.</div></div>
+      <div class="log-levels">${[[0, 3, 'ошибки'], [4, 4, 'предупр.'], [5, 7, 'прочие']].map(([a, b, t]) => `<span><b>${lvl.slice(a, b + 1).reduce((x, y) => x + y, 0)}</b> ${t}</span>`).join('')}</div>
+    </div>
+    ${!lg.count ? '<p class="fix-w" style="margin-top:8px">Записей нет. Если журнал всегда пуст — проверьте, что вывод в буфер включён: info-center enable, info-center logbuffer.</p>' : ''}`;
+
+  const SEV = { high: 'Важно', med: 'Внимание', info: 'Инфо' };
+  $('#logFindings').innerHTML = fs.length ? fs.map(f => {
+    const port = f.port && cfg.ports.find(p => p.name === f.port);
+    const own = f.rule === 'dupip' && ownIps.has(f.ip);
+    return `<div class="issue sev-${f.sev}">
+      <div class="ih"><span class="sev">${SEV[f.sev]}</span><span class="muted" style="font-size:12px">${esc(f.cat)}</span><span class="it">${esc(f.title)}</span></div>
+      <div class="ib">${esc(f.detail)}</div>
+      ${own ? `<p class="fix-w">⚠ Это адрес самого коммутатора (${esc(f.ip)}) — кто-то занял IP управления. Связь с коммутатором может пропадать.</p>` : ''}
+      <p class="log-advice">${esc(f.advice)}</p>
+      <div class="ip">${port ? `${portLink(port)}${port.desc ? ` <span class="muted">${esc(port.desc)}</span>` : ''}` : ''}
+        ${f.ip && f.ip !== 'неизвестно' ? `<button class="plink" data-find="${esc(f.ip)}">где ${esc(f.ip)}?</button>` : ''}
+        ${(f.macs || []).map(mc => `<button class="plink" data-find="${esc(mc)}">где ${esc(mc)}?</button>`).join(' ')}</div>
+      ${f.commands ? `<details class="fix"><summary>Команды</summary>${f.warn ? `<p class="fix-w">⚠ ${esc(f.warn)}</p>` : ''}${cmdBox(f.commands)}</details>` : ''}
+    </div>`;
+  }).join('') : '<p class="muted" style="margin:0">В журнале нет записей о типичных проблемах.</p>';
+
+  const au = lg.audit || { commands: [], logins: [] };
+  $('#logCmds').innerHTML = au.commands.length ? `<div class="table-scroll" style="max-height:340px"><table class="tbl static"><thead><tr><th>Время</th><th>Кто</th><th>Откуда</th><th>Команда</th></tr></thead><tbody>
+    ${au.commands.slice(0, 100).map(c => `<tr><td class="muted" style="white-space:nowrap">${esc(c.time)}</td><td>${esc(c.user || '—')}</td><td class="mono">${c.ip ? `<button class="plink" data-find="${esc(c.ip)}">${esc(c.ip)}</button>` : '—'}</td><td class="mono">${esc(c.command)}</td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="muted" style="margin:0">Команд настройки в журнале нет.</p>';
+  $('#logLogins').innerHTML = au.logins.length ? `<div class="table-scroll" style="max-height:340px"><table class="tbl static"><thead><tr><th>Время</th><th></th><th>Кто</th><th>Откуда</th></tr></thead><tbody>
+    ${au.logins.slice(0, 100).map(c => `<tr><td class="muted" style="white-space:nowrap">${esc(c.time)}</td><td>${esc(c.kind)}</td><td>${esc(c.user || '—')}</td><td class="mono">${esc(c.ip || '—')}</td></tr>`).join('')}
+    </tbody></table></div>` : '<p class="muted" style="margin:0">Записей о входах нет.</p>';
+
+  const other = lg.other || [];
+  $('#logOtherCard').hidden = !other.length;
+  $('#logOther').innerHTML = `<div class="table-scroll"><table class="tbl static"><thead><tr><th>Уровень</th><th>Модуль / тип</th><th>Сколько</th><th>Последнее</th><th>Пример</th></tr></thead><tbody>
+    ${other.map(o => `<tr><td><span class="lvl lvl-${o.level}">${esc(LOG_LEVELS[o.level] || o.level)}</span></td><td class="mono">${esc(o.module)}/${esc(o.brief)}</td><td>${o.count}</td><td class="muted" style="white-space:nowrap">${esc(o.last)}</td><td style="font-size:12.5px">${esc(o.sample)}</td></tr>`).join('')}
+  </tbody></table></div>`;
+  renderLogTable(cfg);
+}
+
+function renderLogTable(cfg) {
+  const lg = cfg.state && cfg.state.log;
+  if (!lg) return;
+  const q = $('#logSearch').value.trim().toLowerCase();
+  const maxLvl = +$('#logLevel').value;
+  const rows = (lg.recent || []).filter(e => e.level <= maxLvl && (!q || `${e.module} ${e.brief} ${e.text}`.toLowerCase().includes(q)));
+  $('#logTable').innerHTML = `<thead><tr><th>Время</th><th>Уровень</th><th>Модуль</th><th>Сообщение</th></tr></thead><tbody>` +
+    rows.slice(0, 300).map(e => `<tr><td class="muted" style="white-space:nowrap">${esc(e.time)}</td><td><span class="lvl lvl-${e.level}">${esc(LOG_LEVELS[e.level] || e.level)}</span></td>
+      <td class="mono" style="font-size:12px">${esc(e.module)}/${esc(e.brief)}</td><td style="font-size:12.5px">${esc(e.text)}</td></tr>`).join('') + '</tbody>';
+  $('#logFoot').textContent = `Показано ${Math.min(rows.length, 300)} из ${rows.length} (последние ${(lg.recent || []).length} записей журнала).`;
+}
+
+function renderLogAll(withCfg) {
+  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.log);
+  const items = rows.flatMap(s => (s.cfg.state.log.findings || []).filter(f => f.sev !== 'info').map(f => ({ s, f })));
+  $('#logAllCard').hidden = !rows.length;
+  if (!rows.length) return;
+  const order = { high: 0, med: 1 };
+  items.sort((a, b) => order[a.f.sev] - order[b.f.sev] || b.f.lastTs - a.f.lastTs);
+  const SEV = { high: 'Важно', med: 'Внимание' };
+  $('#logAll').innerHTML = items.length ? `<thead><tr><th>Коммутатор</th><th>Уровень</th><th>Что в журнале</th><th>Последний раз</th></tr></thead><tbody>` +
+    items.slice(0, 50).map(({ s, f }) => `<tr data-open-sw="${esc(s.id)}" data-open-tab="log">
+      <td><b>${esc(s.name)}</b></td><td class="sev-${f.sev}"><span class="flag" style="background:var(--sb);color:var(--sc)">${SEV[f.sev]}</span></td>
+      <td>${esc(f.title)}</td><td class="muted" style="white-space:nowrap">${esc(f.last)}</td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="muted">В журналах коммутаторов нет записей о типичных проблемах.</td></tr></tbody>';
 }
 
 /* ---------- STP ---------- */
@@ -2544,6 +2630,8 @@ function bind() {
       openPort(gt.dataset.gotoPort);
       return;
     }
+    const fd = e.target.closest('[data-find]');
+    if (fd) { $('#findInput').value = fd.dataset.find; showFind(fd.dataset.find); return; }
     const rb = e.target.closest('[data-restore]');
     if (rb) { openRestore(rb.dataset.restore); return; }
     if (e.target.closest('#restoreGo')) { doRestore(); return; }
@@ -2590,6 +2678,8 @@ function bind() {
   $('#phoneSearch').addEventListener('input', renderPhoneTable);
   $('#cmeSearch').addEventListener('input', renderCmeTable);
   $('#stpFilter').addEventListener('change', () => CFG && renderStpPorts(CFG));
+  $('#logSearch').addEventListener('input', () => CFG && renderLogTable(CFG));
+  $('#logLevel').addEventListener('change', () => CFG && renderLogTable(CFG));
   $('#cmeFilter').addEventListener('change', renderCmeTable);
   $('#drawerBody').addEventListener('input', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });
   $('#drawerBody').addEventListener('change', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });

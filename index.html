@@ -34,6 +34,7 @@
     <button data-tab="l3">L3 и маршруты</button>
     <button data-tab="services">Сервисы</button>
     <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="log" id="logTabBtn" hidden>Журнал <span class="count" id="logCount"></span></button>
     <button data-tab="stp" id="stpTabBtn">STP <span class="count" id="stpCount"></span></button>
     <button data-tab="hw" id="hwTabBtn" hidden>Оборудование <span class="count" id="hwCount"></span></button>
     <button data-tab="standard" id="standardTabBtn" hidden>Эталон <span class="count" id="stdCount"></span></button>
@@ -113,6 +114,10 @@
       </div>
       <div class="map-scroll"><div id="netMap"></div></div>
       <div class="legend" id="mapLegend"></div>
+    </div>
+    <div class="card" id="logAllCard" hidden>
+      <h2>Журналы коммутаторов: главное</h2>
+      <div class="table-scroll"><table class="tbl" id="logAll"></table></div>
     </div>
     <div class="card" id="stpAllCard" hidden>
       <h2>STP на коммутаторах</h2>
@@ -250,6 +255,41 @@
     <div id="issuesList"></div>
   </section>
 
+  <!-- ЖУРНАЛ -->
+  <section class="tab" id="tab-log" hidden>
+    <div class="card"><div id="logSummary"></div></div>
+    <div class="card">
+      <h2>Рекомендации по журналу</h2>
+      <p class="hint">Записи журнала (display logbuffer) сгруппированы по типичным проблемам. Для каждой — что это значит, что сделать и команды для проверки или исправления. Команды только показываются.</p>
+      <div id="logFindings"></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h2>Кто менял конфигурацию</h2><p class="hint">Команды настройки из журнала (без команд просмотра).</p><div id="logCmds"></div></div>
+      <div class="card"><h2>Входы на коммутатор</h2><div id="logLogins"></div></div>
+    </div>
+    <div class="card" id="logOtherCard" hidden style="margin-top:16px">
+      <h2>Прочие предупреждения и ошибки</h2>
+      <p class="hint">Сообщения уровня warning и выше, для которых нет готовой рекомендации.</p>
+      <div id="logOther"></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">
+        <h2>Записи журнала</h2>
+        <div class="controls">
+          <input type="search" id="logSearch" placeholder="Текст, порт, IP, модуль…">
+          <select id="logLevel">
+            <option value="7">Все уровни</option>
+            <option value="5">notice и важнее</option>
+            <option value="4">warning и важнее</option>
+            <option value="3">error и важнее</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-scroll"><table class="tbl static" id="logTable"></table></div>
+      <div class="foot" id="logFoot"></div>
+    </div>
+  </section>
+
   <!-- STP -->
   <section class="tab" id="tab-stp" hidden>
     <div class="grid2">
@@ -335,6 +375,7 @@
             <option value="config">Изменения конфигурации и восстановление</option>
             <option value="hardware">Оборудование (питание, вентиляторы, SFP…)</option>
             <option value="stp">STP (корень, корневой порт)</option>
+            <option value="log">Журнал коммутатора (новые находки)</option>
             <option value="reach">Доступность коммутатора</option>
           </select>
         </div>

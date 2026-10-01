@@ -156,6 +156,15 @@ function onState(sw, prev, cur, configText, directory) {
     }
   }
 
+  // 1г. Журнал коммутатора: новые важные находки (при первом сборе — без событий)
+  if (prev && prev.log && cur.log) {
+    const seen = new Set((prev.log.findings || []).map(f => f.id));
+    for (const f of cur.log.findings || []) {
+      if (seen.has(f.id) || f.sev === 'info') continue;
+      add({ type: 'log', sev: f.sev, port: f.port, text: `Журнал: ${f.title}` });
+    }
+  }
+
   // 1в. STP: сменился корневой мост или корневой порт
   if (prev && prev.stp && cur.stp && prev.stp.root && cur.stp.root) {
     if (prev.stp.root !== cur.stp.root) {

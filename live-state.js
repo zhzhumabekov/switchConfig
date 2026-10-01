@@ -2,6 +2,7 @@
 // таблица MAC-адресов и ARP. Все команды только читают данные.
 const hardware = require('./hardware');
 const stp = require('./stp');
+const log = require('./log');
 
 const COMMANDS = {
   interfaces: 'display interface brief',
@@ -10,6 +11,7 @@ const COMMANDS = {
   arp: 'display arp',
   ...hardware.COMMANDS,
   ...stp.COMMANDS,
+  ...log.COMMANDS,
 };
 
 const MAC_RE = /^([0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4})$/i;
@@ -143,6 +145,7 @@ function parseAll(raw, at = new Date().toISOString()) {
     interfaces,
     hw: hardware.parseHardware(raw, interfaces),
     stp: stp.parseStp(raw),
+    log: log.analyze(raw.logbuffer),
     lldp: parseLldp(raw.lldp),
     mac: parseMac(raw.mac),
     arp: parseArp(raw.arp),
