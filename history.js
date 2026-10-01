@@ -156,6 +156,15 @@ function onState(sw, prev, cur, configText, directory) {
     }
   }
 
+  // 1в. STP: сменился корневой мост или корневой порт
+  if (prev && prev.stp && cur.stp && prev.stp.root && cur.stp.root) {
+    if (prev.stp.root !== cur.stp.root) {
+      add({ type: 'stp-root', sev: 'high', text: `STP: сменился корневой мост ${prev.stp.root} → ${cur.stp.root}${cur.stp.isRoot ? ' (теперь корень — этот коммутатор)' : ''}` });
+    } else if (prev.stp.rootPort && cur.stp.rootPort && prev.stp.rootPort !== cur.stp.rootPort) {
+      add({ type: 'stp-rootport', sev: 'med', port: cur.stp.rootPort, text: `STP: сменился корневой порт ${short(prev.stp.rootPort)} → ${short(cur.stp.rootPort)}` });
+    }
+  }
+
   // 1б. Оборудование: новые и устранённые проблемы (температура, питание, SFP…)
   if (prev && prev.hw && cur.hw) {
     const before = new Map((prev.hw.problems || []).map(p => [p.key, p]));

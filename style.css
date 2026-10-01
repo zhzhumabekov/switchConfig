@@ -486,3 +486,9 @@ a.btn { text-decoration: none; }
 /* ---------- резервные копии ---------- */
 .steps { margin: 0 0 10px; padding-left: 20px; font-size: 13px; }
 .steps li { margin-bottom: 4px; }
+
+/* ---------- STP ---------- */
+.stp-role { display: inline-block; font: 600 11px var(--mono); padding: 1px 7px; border-radius: 9px; background: var(--surface-2); color: var(--muted); }
+.stp-role.stp-root { background: rgba(224, 112, 31, .15); color: var(--r-uplink); }
+.stp-role.stp-desi { background: rgba(47, 168, 79, .13); color: #2e8b57; }
+.stp-role.stp-alt { background: var(--sev-med-bg); color: var(--sev-med); }

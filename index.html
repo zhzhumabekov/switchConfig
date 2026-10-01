@@ -34,6 +34,7 @@
     <button data-tab="l3">L3 и маршруты</button>
     <button data-tab="services">Сервисы</button>
     <button data-tab="issues">Замечания <span class="count" id="issuesCount"></span></button>
+    <button data-tab="stp" id="stpTabBtn">STP <span class="count" id="stpCount"></span></button>
     <button data-tab="hw" id="hwTabBtn" hidden>Оборудование <span class="count" id="hwCount"></span></button>
     <button data-tab="standard" id="standardTabBtn" hidden>Эталон <span class="count" id="stdCount"></span></button>
     <button data-tab="history" id="historyTabBtn" hidden>История</button>
@@ -112,6 +113,11 @@
       </div>
       <div class="map-scroll"><div id="netMap"></div></div>
       <div class="legend" id="mapLegend"></div>
+    </div>
+    <div class="card" id="stpAllCard" hidden>
+      <h2>STP на коммутаторах</h2>
+      <div id="stpAllWarn"></div>
+      <div class="table-scroll"><table class="tbl" id="stpAll"></table></div>
     </div>
     <div class="card" id="hwTableCard" hidden>
       <h2>Оборудование и прошивки</h2>
@@ -244,6 +250,36 @@
     <div id="issuesList"></div>
   </section>
 
+  <!-- STP -->
+  <section class="tab" id="tab-stp" hidden>
+    <div class="grid2">
+      <div class="card"><h2>Spanning Tree</h2><div id="stpSummary"></div></div>
+      <div class="card"><h2>Изменения топологии и защита</h2><div id="stpTc"></div></div>
+    </div>
+    <div class="card" id="stpIssuesCard" hidden style="margin-top:16px">
+      <h2>Замечания по STP</h2>
+      <div id="stpIssues"></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">
+        <h2>Порты</h2>
+        <div class="controls">
+          <select id="stpFilter">
+            <option value="">Все порты с STP</option>
+            <option value="nondesi">Корневые и заблокированные</option>
+            <option value="blocked">Не передают трафик (discarding)</option>
+            <option value="edged">Edged (подключение без задержки)</option>
+            <option value="noedge">Пользовательские без edged</option>
+            <option value="cfg">С настройками STP в конфигурации</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint">Роль: <b>ROOT</b> — путь к корневому мосту, <b>DESI</b> — назначенный (передаёт трафик к сегменту), <b>ALTE/BACK</b> — резервный, заблокирован, чтобы не было петли. Заблокированный резервный линк — это нормально.</p>
+      <div class="table-scroll"><table class="tbl" id="stpPorts"></table></div>
+    </div>
+    <p class="hint" id="stpNote"></p>
+  </section>
+
   <!-- ОБОРУДОВАНИЕ -->
   <section class="tab" id="tab-hw" hidden>
     <div class="card" id="hwProblemsCard" hidden>
@@ -298,6 +334,7 @@
             <option value="ports">Порты (петли, аплинки, ошибки)</option>
             <option value="config">Изменения конфигурации и восстановление</option>
             <option value="hardware">Оборудование (питание, вентиляторы, SFP…)</option>
+            <option value="stp">STP (корень, корневой порт)</option>
             <option value="reach">Доступность коммутатора</option>
           </select>
         </div>

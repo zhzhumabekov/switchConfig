@@ -97,7 +97,7 @@ function parseConfig(text) {
     aaa: { schemes: [], domains: [], users: {} },
     radius: [], ntp: { servers: [], flags: [] }, snmp: { lines: [], communities: 0 },
     ssh: { users: {}, flags: [] }, ui: [], log: [], misc: {},
-    authProfiles: [], dot1x: [],
+    authProfiles: [], dot1x: [], stpLines: [],
   };
 
   const vText = text.match(/^!Software Version\s+(.+)$/m);
@@ -147,6 +147,7 @@ function parseConfig(text) {
     else if (c === 'lldp enable') cfg.misc.lldp = true;
     else if ((m = c.match(/^authentication-profile name\s+(\S+)/))) cfg.authProfiles.push({ name: m[1], opts: n.children.map(x => x.cmd) });
     else if ((m = c.match(/^dot1x-access-profile name\s+(\S+)/))) cfg.dot1x.push({ name: m[1], opts: n.children.map(x => x.cmd) });
+    else if (/^(undo )?stp\b/.test(c)) cfg.stpLines.push(nodeText(n));
     else cfg.others.push(nodeText(n));
   }
 
@@ -173,6 +174,7 @@ function parseInterface(cfg, name, n) {
     slot, sub, idx, lines,
     desc: '', portDesc: '', linkType: '', pvid: null, allowed: [], untagged: [],
     lbd: false, voiceVlan: null, lldpOff: false, negOff: false, stpEdgeOff: false, shutdown: false,
+    stpLines: [], edged: null, stpOff: false, rootProt: false, loopProt: false, bpduFilter: false,
   };
   for (const l of lines) {
     let r;
@@ -188,8 +190,17 @@ function parseInterface(cfg, name, n) {
     else if ((r = l.match(/voice-vlan vlan\s+(\d+)/))) p.voiceVlan = +r[1];
     else if (l === 'undo lldp enable') p.lldpOff = true;
     else if (l === 'undo negotiation auto') p.negOff = true;
-    else if (l === 'stp edged-port disable') p.stpEdgeOff = true;
+    else if (l === 'stp edged-port disable') { p.stpEdgeOff = true; p.edged = false; }
     else if (l === 'shutdown') p.shutdown = true;
+    // Настройки STP порта
+    if (/^(undo )?stp\b/.test(l)) {
+      p.stpLines.push(l);
+      if (l === 'stp edged-port enable') p.edged = true;
+      if (l === 'stp disable' || l === 'undo stp enable') p.stpOff = true;
+      if (l === 'stp root-protection') p.rootProt = true;
+      if (l === 'stp loop-protection') p.loopProt = true;
+      if (/^stp bpdu-filter enable/.test(l)) p.bpduFilter = true;
+    }
   }
   if (p.linkType === 'access' && p.pvid != null) p.allowed = [{ from: p.pvid, to: p.pvid }];
   p.effPvid = p.pvid ?? (p.lines.length ? 1 : null);
@@ -345,9 +356,41 @@ function analyze(cfg) {
   const unused = declaredList.filter(v => !narrow.some(p => carries(p, v)) && !cfg.vlanifs.some(vi => vi.vlan === v));
   if (unused.length) issues.push({ kind: 'vlan-unused', data: { vlans: unused }, sev: 'info', title: `VLAN созданы, но не назначены ни одному порту доступа: ${unused.join(', ')}`, body: 'Эти VLAN проходят только через широкий транк (например, 2–4094) или не используются вовсе.', extra: unused.map(v => vlanChip(v, cfg)).join(' ') });
 
+  // 10. STP по конфигурации
+  const sc = stpConfig(cfg);
+  if (sc.disabled) issues.push({ kind: 'stp-disabled', sev: 'high', title: 'STP выключен', body: 'Без STP петля в сети (например, кабель, замкнутый между двумя портами или коммутаторами) остановит работу всего сегмента.' });
+  else {
+    const userPorts = active.filter(p => ['access', 'ap', 'printer', 'test'].includes(p.role) && !p.shutdown && !p.stpOff);
+    const noEdge = userPorts.filter(p => !stpEdged(p, sc));
+    const edged = active.filter(p => stpEdged(p, sc));
+    if (noEdge.length) issues.push({ kind: 'stp-noedge', data: { noBpdu: !sc.bpduProtection }, sev: 'med', title: `Пользовательские порты не настроены как edged (${noEdge.length})`, body: 'Порт без edged после подключения ждёт ~30 с, прежде чем начать передавать трафик, и каждое включение ПК вызывает изменение топологии STP (сброс таблиц MAC на всех коммутаторах).', ports: noEdge, collapse: true });
+    if (!sc.bpduProtection && (edged.length || noEdge.length)) {
+      const uplinkEdged = edged.filter(p => ['uplink', 'link'].includes(p.role)).map(p => p.short);
+      issues.push({ kind: 'stp-nobpdu', data: { uplinkEdged }, sev: 'med', title: 'Нет защиты от чужих коммутаторов (bpdu-protection)', body: 'Если к пользовательскому порту подключат коммутатор, он может стать корнем STP или вызвать перестроение всей сети. stp bpdu-protection отключает edged-порт, на который пришёл BPDU.' });
+    }
+    const offUp = active.filter(p => p.stpOff && ['uplink', 'link', 'trunk'].includes(p.role));
+    if (offUp.length) issues.push({ kind: 'stp-port-off', sev: 'high', title: 'STP выключен на магистральных портах', body: 'На этих портах петля не будет обнаружена.', ports: offUp });
+  }
+
   const order = { high: 0, med: 1, info: 2 };
   return issues.sort((a, b) => order[a.sev] - order[b.sev]);
 }
+
+/* ---------- STP: настройки из конфигурации ---------- */
+function stpConfig(cfg) {
+  const ls = (cfg.stpLines || []).map(x => x.split('\n')[0].trim());
+  const has = re => ls.some(l => re.test(l));
+  const pr = ls.map(l => l.match(/^stp (?:instance 0 )?priority (\d+)/)).find(Boolean);
+  return {
+    lines: cfg.stpLines || [],
+    mode: (ls.map(l => l.match(/^stp mode (\S+)/)).find(Boolean) || [])[1] || '',
+    priority: pr ? +pr[1] : has(/^stp (instance 0 )?root primary/) ? 0 : has(/^stp (instance 0 )?root secondary/) ? 4096 : null,
+    bpduProtection: has(/^stp bpdu-protection$/),
+    edgedDefault: has(/^stp edged-port default$/),
+    disabled: has(/^stp disable$/) || has(/^undo stp enable$/),
+  };
+}
+const stpEdged = (p, sc) => p.edged === true || (sc.edgedDefault && p.edged !== false);
 
 /* =====================================================================
    Рендер
@@ -387,6 +430,26 @@ function attachState(cfg, st) {
   const upDown = ports.filter(p => ['uplink', 'link'].includes(p.role) && p.st.status !== 'up');
   if (upDown.length) cfg.issues.push({ kind: 'uplink-down', sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
   const errs = ports.filter(p => p.st.inErr + p.st.outErr > 0);
+  const stp = st.stp;
+  if (stp && stp.bridge) {
+    const sc = stpConfig(cfg);
+    const hasUplink = cfg.ports.some(p => p.role === 'uplink');
+    if (stp.isRoot && hasUplink) cfg.issues.push({ kind: 'stp-root-self', sev: sc.priority != null ? 'info' : 'high', live: true,
+      title: 'Этот коммутатор — корневой мост STP', body: sc.priority != null ? `Приоритет задан вручную (${sc.priority}). Если это не ядро сети — проверьте, что так задумано.` : 'У коммутатора есть аплинк, значит это не ядро. Корнем стал из-за приоритета по умолчанию (32768) — путь трафика может быть неоптимальным, а перестроения затронут всю сеть.' });
+    const rp = stp.rootPort && cfg.ports.find(p => p.name === stp.rootPort);
+    if (rp && ['access', 'ap', 'printer', 'test'].includes(rp.role)) cfg.issues.push({ kind: 'stp-rootport-user', sev: 'high', live: true,
+      title: `Корневой порт STP — пользовательский порт ${rp.short}`, body: 'Путь к корневому мосту идёт через пользовательский порт. Похоже, к нему подключён коммутатор, который стал корнем или лучшим путём к нему.', ports: [rp] });
+    const bpduDown = Object.entries(stp.ports).filter(([, x]) => x.protection === 'BPDU').map(([n]) => cfg.ports.find(p => p.name === n)).filter(Boolean);
+    if (bpduDown.length) cfg.issues.push({ kind: 'stp-bpdu-down', sev: 'high', live: true, title: 'Порты отключены защитой BPDU', body: 'На эти пользовательские порты пришёл BPDU — к ним подключили коммутатор. Порт выключен защитой.', ports: bpduDown });
+    const up = st.hw && st.hw.version && st.hw.version.uptimeSec;
+    const perDay = up ? stp.tcCount / Math.max(1, up / 86400) : null;
+    if (stp.lastTcSec != null && (stp.lastTcSec < 900 || (perDay != null && perDay > 20))) {
+      const tp = stp.lastTcPort && cfg.ports.find(p => p.name === stp.lastTcPort);
+      cfg.issues.push({ kind: 'stp-tc', data: { port: stp.lastTcPort }, sev: perDay != null && perDay > 20 ? 'med' : 'info', live: true,
+        title: perDay != null && perDay > 20 ? `Частые изменения топологии STP: ~${Math.round(perDay)} в сутки` : `Недавнее изменение топологии STP (${Math.round(stp.lastTcSec / 60)} мин назад)`,
+        body: `Всего изменений: ${stp.tcCount}. Последнее пришло через ${tp ? tp.short + (tp.desc ? ' (' + tp.desc + ')' : '') : (stp.lastTcPort || '—')}.`, ports: tp ? [tp] : undefined });
+    }
+  }
   for (const pr of (st.hw && st.hw.problems) || []) {
     const port = pr.port && cfg.ports.find(x => x.name === pr.port);
     cfg.issues.push({ kind: 'hw', data: { key: pr.key, cmd: pr.cmd }, sev: pr.sev, live: true, title: pr.text,
@@ -565,6 +628,7 @@ function render(cfg, sw = null) {
   renderHistory(sw);
   renderStandard(cfg, sw);
   renderHardware(cfg, sw);
+  renderStp(cfg, sw);
   showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) || (state.tab === 'hw' && $('#hwTabBtn').hidden) ? 'overview' : state.tab);
 }
 
@@ -1230,6 +1294,7 @@ function renderAll() {
   // Схема сети и оборудование
   renderMap(withCfg);
   renderHwTable(withCfg);
+  renderStpAll(withCfg);
 
   // Соответствие эталону
   renderStdMatrix(withCfg);
@@ -1408,7 +1473,7 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️', 'stp-root': '🌳', 'stp-rootport': '🌿',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
@@ -1418,6 +1483,7 @@ const EV_GROUPS = {
   reach: e => ['unreachable', 'recovered'].includes(e.type),
   hardware: e => ['hw', 'hw-ok'].includes(e.type),
   backup: e => ['backup', 'restore', 'restore-undo'].includes(e.type),
+  stp: e => ['stp-root', 'stp-rootport'].includes(e.type),
 };
 
 function fmtTime(iso) {
@@ -1945,13 +2011,127 @@ function updateNewPhoneCmds() {
     (r ? cmdBox(r.commands) + '<p class="fix-n">Выполните на роутере и сохраните: <code>write memory</code>. Телефон зарегистрируется после подключения к сети (для 79xx может понадобиться прошивка на TFTP).</p>' : '');
 }
 
+/* ---------- STP ---------- */
+const STP_ROLE = { ROOT: 'корневой', DESI: 'назначенный', ALTE: 'резервный', BACK: 'запасной', MAST: 'master', DISA: 'выключен', NONE: '—' };
+
+// Имя коммутатора по идентификатору моста (MAC после точки)
+function bridgeName(id) {
+  const mac = String(id || '').split('.').pop().toLowerCase();
+  for (const s of SWITCHES) if (s.cfg && s.cfg.state && s.cfg.state.stp && String(s.cfg.state.stp.bridge).split('.').pop().toLowerCase() === mac) return s.name;
+  return '';
+}
+function stpRoleBadge(x) {
+  if (!x) return '<span class="muted">—</span>';
+  const cls = x.role === 'ROOT' ? 'stp-root' : (x.role === 'ALTE' || x.role === 'BACK') ? 'stp-alt' : x.role === 'DESI' ? 'stp-desi' : 'stp-other';
+  return `<span class="stp-role ${cls}" title="${esc(STP_ROLE[x.role] || x.role)}">${esc(x.role)}</span>`;
+}
+
+function renderStp(cfg, sw) {
+  const sc = stpConfig(cfg);
+  const stp = cfg.state && cfg.state.stp && cfg.state.stp.bridge ? cfg.state.stp : null;
+  const issues = cfg.issues.filter(i => /^stp-/.test(i.kind || ''));
+  $('#stpCount').textContent = issues.filter(i => i.sev !== 'info').length || '';
+  const rp = stp && stp.rootPort ? cfg.ports.find(p => p.name === stp.rootPort) : null;
+  const rootName = stp ? (stp.isRoot ? 'этот коммутатор' : bridgeName(stp.root) || (rp && rp.lldp && rp.lldp[0] ? `за портом — сосед ${rp.lldp[0].device}` : '')) : '';
+  $('#stpSummary').innerHTML = `<dl class="kv">
+      <dt>Состояние</dt><dd>${sc.disabled || (stp && stp.disabled) ? '<span class="flag warn">выключен</span>' : '<span class="flag">включён</span>'}</dd>
+      <dt>Режим</dt><dd>${esc((stp && stp.mode) || sc.mode.toUpperCase() || 'MSTP (по умолчанию)')}</dd>
+      <dt>Приоритет моста</dt><dd>${sc.priority != null ? `<b>${sc.priority}</b> (задан в конфигурации)` : '32768 (по умолчанию)'}</dd>
+      ${stp ? `<dt>Этот мост</dt><dd class="mono">${esc(stp.bridge)}</dd>
+      <dt>Корневой мост</dt><dd><span class="mono">${esc(stp.root)}</span>${rootName ? ` <span class="muted">— ${esc(rootName)}</span>` : ''}</dd>
+      <dt>Корневой порт</dt><dd>${rp ? `${portLink(rp)}${rp.desc ? ` <span class="muted">${esc(rp.desc)}</span>` : ''}` : stp.isRoot ? '<span class="muted">нет (коммутатор сам корень)</span>' : esc(stp.rootPort || '—')}</dd>
+      <dt>Стоимость до корня</dt><dd>${stp.rootCost ?? '—'}</dd>
+      <dt>Таймеры</dt><dd class="muted">${esc(stp.times || '—')}</dd>` : ''}
+    </dl>
+    ${sc.lines.length ? `<div class="sub">Глобальные настройки STP</div><pre>${esc(sc.lines.join('\n'))}</pre>` : '<p class="hint" style="margin:10px 0 0">Глобальных настроек STP в конфигурации нет — используются значения по умолчанию.</p>'}`;
+
+  const tcPort = stp && stp.lastTcPort ? cfg.ports.find(p => p.name === stp.lastTcPort) : null;
+  $('#stpTc').innerHTML = stp ? `<dl class="kv">
+      <dt>Изменений топологии</dt><dd><b>${stp.tcCount}</b> <span class="muted">(получено TC/TCN: ${stp.tcReceived})</span></dd>
+      <dt>Последнее</dt><dd>${stp.lastTcSec != null ? esc(fmtUptime(stp.lastTcSec)) + ' назад' : '—'}</dd>
+      <dt>Через порт</dt><dd>${tcPort ? portLink(tcPort) + (tcPort.desc ? ` <span class="muted">${esc(tcPort.desc)}</span>` : '') : esc(stp.lastTcPort || '—')}</dd>
+      <dt>BPDU-protection</dt><dd>${stp.bpduProtection || sc.bpduProtection ? '<span class="flag">включена</span>' : '<span class="flag warn">выключена</span>'}</dd>
+      <dt>Edged по умолчанию</dt><dd>${sc.edgedDefault ? 'да (stp edged-port default)' : 'нет'}</dd>
+      <dt>Заблокировано резервных</dt><dd>${Object.values(stp.ports).filter(x => (x.role === 'ALTE' || x.role === 'BACK') && x.state === 'DISCARDING').length}</dd>
+    </dl>` : '<p class="muted" style="margin:0">Нет данных о текущем состоянии STP — нажмите «Обновить с коммутатора».</p>';
+
+  $('#stpIssuesCard').hidden = !issues.length;
+  const SEV = { high: 'Важно', med: 'Внимание', info: 'Инфо' };
+  $('#stpIssues').innerHTML = issues.map(i => `<div class="issue sev-${i.sev}" style="padding:10px 14px">
+      <div class="ih"><span class="sev">${SEV[i.sev]}</span><span class="it">${esc(i.title)}</span></div>
+      <div class="ib">${esc(i.body)}</div>
+      ${i.ports ? `<div class="ip"><span class="mono muted">${esc(compressPorts(i.ports))}</span></div>` : ''}
+      ${fixHtml(i, cfg)}</div>`).join('');
+  renderStpPorts(cfg);
+  $('#stpNote').textContent = stp ? `Данные ${ago(cfg.state.at)}. Учитывается экземпляр 0 (CIST).` : '';
+}
+
+function renderStpPorts(cfg) {
+  const sc = stpConfig(cfg);
+  const live = cfg.state && cfg.state.stp ? cfg.state.stp.ports : {};
+  const f = $('#stpFilter').value;
+  const user = p => ['access', 'ap', 'printer', 'test'].includes(p.role);
+  const rows = cfg.ports.filter(p => {
+    const x = live[p.name];
+    if (!x && !p.stpLines.length && !(user(p) && p.lines.length)) return false;
+    if (f === 'nondesi') return x && x.role !== 'DESI';
+    if (f === 'blocked') return x && x.state === 'DISCARDING';
+    if (f === 'edged') return stpEdged(p, sc);
+    if (f === 'noedge') return user(p) && p.lines.length && !p.shutdown && !stpEdged(p, sc);
+    if (f === 'cfg') return p.stpLines.length > 0;
+    return !!x || p.stpLines.length > 0;
+  }).sort((a, b) => {
+    const r = x => ({ ROOT: 0, ALTE: 1, BACK: 2 }[(live[x.name] || {}).role] ?? 3);
+    return r(a) - r(b) || portSort(a, b);
+  });
+  $('#stpPorts').innerHTML = `<thead><tr><th>Порт</th><th>Роль STP</th><th>Состояние</th><th>Защита</th><th>Edged</th><th>Назначение</th><th>Сосед / описание</th><th>Настройки STP</th></tr></thead><tbody>` +
+    rows.slice(0, 400).map(p => { const x = live[p.name]; return `<tr data-port="${esc(p.name)}">
+      <td class="mono"><b>${esc(p.short)}</b></td>
+      <td>${stpRoleBadge(x)}</td>
+      <td>${x ? `<span class="${x.state === 'FORWARDING' ? 'live live-up' : 'flag warn'}">${esc(x.state.toLowerCase())}</span>` : '<span class="muted">—</span>'}</td>
+      <td>${x && x.protection !== 'NONE' ? `<span class="flag warn">${esc(x.protection)}</span>` : '<span class="muted">—</span>'}</td>
+      <td>${stpEdged(p, sc) ? '<span class="flag">да</span>' : '<span class="muted">нет</span>'}</td>
+      <td>${roleChip(p.role)}</td>
+      <td>${p.lldp && p.lldp.length ? connectedText(p) : esc(p.desc || '')}</td>
+      <td class="mono" style="font-size:12px">${esc(p.stpLines.join('; ')) || '<span class="muted">—</span>'}</td>
+    </tr>`; }).join('') + '</tbody>' + (rows.length ? '' : '<tbody><tr><td colspan="8" class="muted">Нет портов под этот фильтр</td></tr></tbody>');
+}
+
+function renderStpAll(withCfg) {
+  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.stp && s.cfg.state.stp.bridge);
+  $('#stpAllCard').hidden = !rows.length;
+  if (!rows.length) return;
+  const roots = [...new Set(rows.map(s => s.cfg.state.stp.root))];
+  $('#stpAllWarn').innerHTML = roots.length > 1 ? `<div class="issue sev-high" style="padding:8px 12px;margin-bottom:10px"><div class="ih"><span class="sev">Важно</span>
+      <span class="it">У коммутаторов разные корневые мосты: ${roots.map(r => esc(bridgeName(r) || r)).join(', ')}</span></div>
+      <div class="ib">В одной сети корень должен быть один. Возможно, сеть разделена на несвязанные части, или где-то STP выключен на линке.</div></div>`
+    : `<p class="hint">Все коммутаторы видят один корневой мост: <b>${esc(bridgeName(roots[0]) || roots[0])}</b>.</p>`;
+  $('#stpAll').innerHTML = `<thead><tr><th>Коммутатор</th><th>Режим</th><th>Корневой мост</th><th>Корневой порт</th><th>Стоимость</th><th>Последнее TC</th><th>BPDU-protection</th><th>Замечания</th></tr></thead><tbody>` +
+    rows.map(s => {
+      const stp = s.cfg.state.stp, sc = stpConfig(s.cfg);
+      const rp = s.cfg.ports.find(p => p.name === stp.rootPort);
+      const iss = s.cfg.issues.filter(i => /^stp-/.test(i.kind || '') && i.sev !== 'info');
+      return `<tr data-open-sw="${esc(s.id)}" data-open-tab="stp">
+        <td><b>${esc(s.name)}</b></td>
+        <td>${esc(stp.mode || sc.mode || '—')}</td>
+        <td>${stp.isRoot ? '<b>этот коммутатор</b>' : esc(bridgeName(stp.root) || stp.root)}</td>
+        <td class="mono">${rp ? esc(rp.short) + (rp.desc ? ` <span class="muted">${esc(rp.desc)}</span>` : '') : '—'}</td>
+        <td>${stp.rootCost ?? '—'}</td>
+        <td>${stp.lastTcSec != null ? esc(fmtUptime(stp.lastTcSec)) + ' назад' : '—'}</td>
+        <td>${stp.bpduProtection || sc.bpduProtection ? '<span class="flag">да</span>' : '<span class="flag warn">нет</span>'}</td>
+        <td>${iss.length ? iss.map(i => `<span class="flag warn" title="${esc(i.title)}">${esc(i.title.length > 38 ? i.title.slice(0, 37) + '…' : i.title)}</span>`).join(' ') : '<span class="flag">норма</span>'}</td>
+      </tr>`;
+    }).join('') + '</tbody>';
+}
+
 /* ---------- оборудование и схема сети (этап 5) ---------- */
 const HW_CMDS = ['display version', 'display device', 'display stack', 'display cpu-usage', 'display memory-usage', 'display temperature all', 'display power', 'display fan', 'display transceiver verbose'];
 
 function fmtUptime(sec) {
   if (sec == null) return '—';
   const d = Math.floor(sec / 86400), hh = Math.floor((sec % 86400) / 3600);
-  return d ? `${d} ${plural(d, 'день', 'дня', 'дней')}${hh ? ` ${hh} ч` : ''}` : `${hh} ч ${Math.floor((sec % 3600) / 60)} мин`;
+  const mm = Math.floor((sec % 3600) / 60);
+  return d ? `${d} ${plural(d, 'день', 'дня', 'дней')}${hh ? ` ${hh} ч` : ''}` : hh ? `${hh} ч ${mm} мин` : `${mm} мин`;
 }
 function bar(pct, warn = 80, bad = 95) {
   if (pct == null) return '<span class="muted">—</span>';
@@ -2409,6 +2589,7 @@ function bind() {
   $('#drawerBody').addEventListener('input', e => { if (e.target.id === 'restoreConfirm') $('#restoreGo').disabled = e.target.value.trim() !== e.target.dataset.name; });
   $('#phoneSearch').addEventListener('input', renderPhoneTable);
   $('#cmeSearch').addEventListener('input', renderCmeTable);
+  $('#stpFilter').addEventListener('change', () => CFG && renderStpPorts(CFG));
   $('#cmeFilter').addEventListener('change', renderCmeTable);
   $('#drawerBody').addEventListener('input', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });
   $('#drawerBody').addEventListener('change', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });

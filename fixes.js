@@ -106,6 +106,32 @@
         return [variant('Диагностика', ports.map(p => `display interface ${p.name}`).join('\n'),
           'Посмотрите тип ошибок (CRC — обычно кабель или разъём). После замены кабеля сбросьте счётчики и понаблюдайте:'),
         variant('Сбросить счётчики', ports.map(p => `reset counters interface ${p.name}`).join('\n'))];
+      case 'stp-disabled':
+        return [variant('Включить STP', sys(['stp enable']))];
+      case 'stp-port-off':
+        return [variant('Включить STP на портах', sys(perPort(ports, p => [p.stpLines.includes('undo stp enable') ? 'stp enable' : 'undo stp disable'])))];
+      case 'stp-noedge':
+        return [variant('Сделать пользовательские порты edged', sys(perPort(ports, () => ['stp edged-port enable'])),
+          'Порт начнёт передавать трафик сразу после подключения (без 30 с ожидания) и не будет вызывать изменение топологии при включении ПК. Если на такой порт придёт BPDU (подключили коммутатор), он перестанет быть edged автоматически.',
+          d.noBpdu ? 'Включите вместе с этим «stp bpdu-protection» (см. соседнее замечание), чтобы коммутатор, подключённый к пользовательскому порту, не повлиял на STP.' : '')];
+      case 'stp-nobpdu':
+        return [variant('Включить BPDU-protection', sys(['stp bpdu-protection', 'error-down auto-recovery cause bpdu-protection interval 300']),
+          'Edged-порт, на который придёт BPDU (кто-то подключил коммутатор), отключится и сам включится через 5 минут.',
+          d.uplinkEdged.length ? `Сначала уберите edged с аплинков, иначе они отключатся: ${d.uplinkEdged.join(', ')} → «stp edged-port disable».` : 'Убедитесь, что аплинки не настроены как edged (stp edged-port disable), иначе при включении защиты они отключатся.')];
+      case 'stp-root-self':
+        return [variant('Сделать этот коммутатор наименее предпочтительным корнем', sys(['stp priority 61440']),
+          'Корнем должен быть коммутатор ядра. На нём: system-view → stp root primary (или stp priority 4096).',
+          'Смена приоритета вызовет пересчёт STP — на несколько секунд возможны перерывы связи. Делайте в окно обслуживания.')];
+      case 'stp-rootport-user':
+        return [variant('Диагностика', ports.flatMap(p => [`display stp interface ${p.name}`, `display lldp neighbor interface ${p.name}`, `display mac-address interface ${p.name}`]).join('\n'),
+          'К пользовательскому порту, скорее всего, подключён коммутатор с лучшим приоритетом STP. Найдите его; защититься поможет stp bpdu-protection и edged на пользовательских портах.')];
+      case 'stp-bpdu-down':
+        return [variant('Диагностика', ports.map(p => `display mac-address interface ${p.name}`).join('\n'),
+          'На порт пришёл BPDU — к нему подключили коммутатор или точку доступа в режиме моста. Уберите устройство, затем включите порт:'),
+        variant('Включить порт', sys(perPort(ports, () => ['shutdown', 'undo shutdown'])))];
+      case 'stp-tc':
+        return [variant('Диагностика', ['display stp tc-bpdu statistics', ...(d.port ? [`display stp interface ${d.port}`] : [])].join('\n'),
+          'Изменения топологии сбрасывают таблицы MAC — трафик кратковременно рассылается во все порты. Частая причина — пользовательские порты без edged (каждое включение ПК).')];
       case 'hw':
         return [variant('Диагностика', d.cmd || 'display device',
           /^sfp/.test(d.key || '') ? 'Слабый сигнал обычно из-за грязного разъёма, перегиба или повреждения волокна, либо изношенного модуля. Почистите коннекторы и сравните с модулем на другой стороне линии.' :
