@@ -12,6 +12,7 @@ const directory = require('./directory');
 const collector = require('./collector');
 const history = require('./history');
 const scheduler = require('./scheduler');
+const backup = require('./backup');
 const { redact } = require('./update-config');
 
 const STANDARD = path.join(__dirname, 'data', 'standard.json');
@@ -51,7 +52,7 @@ function publicView(s) {
     id: s.id, name: s.name, host: s.host, port: s.port, user: s.user, type: s.type || 'huawei', hasEnable: !!s.enableSecret,
     hasPassword: !!s.secret, sysname: s.sysname || '', lastFetch: s.lastFetch || null,
     lastError: s.lastError || null, lastChange: s.lastChange || null, source: s.source || '',
-    hasConfig: !!store.readConfig(s.id), stateAt: s.stateAt || null, busy: collector.busy.has(s.id),
+    hasConfig: !!store.readConfig(s.id), stateAt: s.stateAt || null, busy: collector.busy.has(s.id), lastRestore: s.lastRestore || null,
   };
 }
 
@@ -143,7 +144,34 @@ async function api(req, res, parts) {
     if (!ts) return send(res, 200, history.listVersions(id));
     const text = history.readVersion(id, ts);
     if (text == null) throw new HttpError(404, 'Версия не найдена');
+    const q = new URL(req.url, 'http://x').searchParams;
+    if (q.get('download')) {
+      // Файл для сохранения на компьютер. Без скрытия секретов (raw=1) — только со своей страницы
+      const raw = q.get('raw') === '1';
+      if (raw && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'] || 'none')) throw new HttpError(403, 'Запрещено');
+      const sw = store.load().find(x => x.id === id);
+      const name = `${(sw && (sw.sysname || sw.name) || id).replace(/[^\w.-]+/g, '_')}_${ts.replace(/[:.]/g, '-')}.cfg`;
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}"`, 'Cache-Control': 'no-store' });
+      return res.end(raw ? text : redact(text));
+    }
     return send(res, 200, redact(text));
+  }
+
+  if (res1 === 'switches' && id && action === 'history' && method === 'POST' && parts[4] && parts[5] === 'unpin') {
+    const v = history.unpinVersion(id, parts[4]);
+    if (!v) throw new HttpError(404, 'Версия не найдена');
+    return send(res, 200, v);
+  }
+
+  if (res1 === 'switches' && id && action === 'backup' && method === 'POST') {
+    const b = await readBody(req);
+    return send(res, 200, await backup.backupNow(id, String(b.note || '').slice(0, 200)));
+  }
+
+  if (res1 === 'switches' && id && action === 'restore' && method === 'POST') {
+    const b = await readBody(req);
+    if (parts[4] === 'undo') return send(res, 200, await backup.undoRestore(id));
+    return send(res, 200, await backup.restore(id, String(b.ts || ''), b.confirm));
   }
 
   if (res1 === 'events' && method === 'GET') {

@@ -112,7 +112,11 @@ function runCommands(opt, password, commands) {
           buf += d.toString('utf8');
           // Если пагинация не отключилась — отвечаем пробелом
           if (V.more.test(buf)) { stream.write(' '); return; }
-          if (/\[Y\/N\]:?\s*$/i.test(buf)) { stream.write('N\n'); return; }  // напр. «сменить пароль?»
+          if (/(\[Y\/N\]|\(y\/n\)(\[[yn]\])?)\s*:?\s*$/i.test(buf)) {
+            // При входе — «нет» (например, «сменить пароль?»); в командах с opt.answerYes — «да»
+            stream.write(opt.answerYes && idx >= 1 ? 'Y\n' : 'N\n');
+            return;
+          }
 
           // Cisco: переход в привилегированный режим (enable)
           if (enabling) {
@@ -155,23 +159,49 @@ function runCommands(opt, password, commands) {
     conn.on('keyboard-interactive', (name, instr, lang, prompts, done) => done(prompts.map(() => password)));
     conn.on('error', err => finish(err));
 
-    conn.connect({
-      host: opt.host,
-      port: opt.port,
-      username: opt.user,
-      password,
-      tryKeyboard: true,
-      readyTimeout: 20000,
-      // Коммутаторы на V200R0xx поддерживают только старые алгоритмы. Ключ хоста
-      // ecdsa-sha2-nistp521 исключён: VRP подписывает им некорректно
-      // («signature verification failed»), поэтому используем ssh-rsa.
-      algorithms: {
-        kex: { append: ['diffie-hellman-group14-sha1', 'diffie-hellman-group-exchange-sha1', 'diffie-hellman-group1-sha1'] },
-        cipher: { append: ['aes128-cbc', 'aes256-cbc', '3des-cbc'] },
-        serverHostKey: ['ssh-ed25519', 'rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ssh-dss'],
-        hmac: { append: ['hmac-sha1'] },
-      },
-    });
+    conn.connect(sshConfig(opt, password));
+  });
+}
+
+function sshConfig(opt, password) {
+  return {
+    host: opt.host,
+    port: opt.port,
+    username: opt.user,
+    password,
+    tryKeyboard: true,
+    readyTimeout: 20000,
+    // Коммутаторы на V200R0xx поддерживают только старые алгоритмы. Ключ хоста
+    // ecdsa-sha2-nistp521 исключён: VRP подписывает им некорректно
+    // («signature verification failed»), поэтому используем ssh-rsa.
+    algorithms: {
+      kex: { append: ['diffie-hellman-group14-sha1', 'diffie-hellman-group-exchange-sha1', 'diffie-hellman-group1-sha1'] },
+      cipher: { append: ['aes128-cbc', 'aes256-cbc', '3des-cbc'] },
+      serverHostKey: ['ssh-ed25519', 'rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ssh-dss'],
+      hmac: { append: ['hmac-sha1'] },
+    },
+  };
+}
+
+// Загружает файл на коммутатор по SFTP (корень SFTP на Huawei — flash:). Возвращает размер.
+function uploadFile(opt, password, remoteName, content) {
+  const timeout = opt.timeout || 60;
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    let settled = false;
+    const finish = (err, v) => { if (settled) return; settled = true; clearTimeout(timer); err ? reject(err) : resolve(v); conn.end(); };
+    const timer = setTimeout(() => finish(new Error(`Таймаут ${timeout} с при передаче файла`)), timeout * 1000);
+    conn.on('keyboard-interactive', (name, instr, lang, prompts, done) => done(prompts.map(() => password)));
+    conn.on('error', finish);
+    conn.on('ready', () => conn.sftp((err, sftp) => {
+      if (err) return finish(new Error('SFTP недоступен: ' + err.message + '. Нужны «sftp server enable» и service-type sftp у пользователя.'));
+      const data = Buffer.from(content, 'utf8');
+      sftp.writeFile(remoteName, data, e => {
+        if (e) return finish(new Error('Не удалось записать файл на коммутатор: ' + e.message));
+        sftp.stat(remoteName, (e2, st) => finish(null, st ? st.size : data.length));
+      });
+    }));
+    conn.connect(sshConfig(opt, password));
   });
 }
 
@@ -234,7 +264,7 @@ function humanError(err) {
   return m;
 }
 
-module.exports = { runCommands, fetchConfig, extract, clean, humanError, VENDORS };
+module.exports = { runCommands, uploadFile, fetchConfig, extract, clean, humanError, VENDORS };
 
 if (require.main === module) {
   main().catch(err => {

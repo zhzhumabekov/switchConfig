@@ -1408,15 +1408,16 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
   devices: e => ['new-device', 'unknown-device', 'moved', 'phone-unreg', 'phone-reg'].includes(e.type),
   ports: e => ['loop', 'loop-cleared', 'uplink-down', 'uplink-up', 'errors'].includes(e.type),
-  config: e => e.type === 'config-changed',
+  config: e => ['config-changed', 'backup', 'restore', 'restore-undo'].includes(e.type),
   reach: e => ['unreachable', 'recovered'].includes(e.type),
   hardware: e => ['hw', 'hw-ok'].includes(e.type),
+  backup: e => ['backup', 'restore', 'restore-undo'].includes(e.type),
 };
 
 function fmtTime(iso) {
@@ -1469,6 +1470,7 @@ async function renderHistory(sw) {
   const keepA = HIST && HIST.sw === id ? $('#verA').value : '', keepB = HIST && HIST.sw === id ? $('#verB').value : '';
   HIST = { sw: id, versions, events, cache: HIST && HIST.sw === id ? HIST.cache : {} };
   renderSwEvents();
+  renderBackups(sw);
 
   const label = v => `${fmtTime(v.ts)}${v.added != null ? ` · +${v.added} / −${v.removed}` : ' · первая'}`;
   const opts = versions.map(v => `<option value="${esc(v.ts)}">${esc(label(v))}</option>`).join('');
@@ -1494,6 +1496,113 @@ async function renderHistory(sw) {
       <td>${versions[i + 1] ? `<button class="plink" data-ver-a="${esc(versions[i + 1].ts)}" data-ver-b="${esc(v.ts)}">сравнить с предыдущей</button>` : ''}</td></tr>`).join('')}
     </tbody></table></details>`;
   showDiff();
+}
+
+/* ---------- резервные копии и восстановление ---------- */
+function renderBackups(sw) {
+  const lr = sw && sw.lastRestore;
+  $('#restoreBanner').innerHTML = lr && !lr.undone ? `<div class="issue sev-high" style="margin-bottom:12px">
+      <div class="ih"><span class="sev">Ожидает перезагрузки</span><span class="it">Назначено восстановление версии от ${esc(new Date(lr.ts).toLocaleString('ru-RU'))}</span></div>
+      <div class="ib">Файл <code>${esc(lr.file)}</code> назначен конфигурацией для следующей загрузки (${esc(fmtTime(lr.at))}). Чтобы применить — перезагрузите коммутатор в окно обслуживания командой <code>reboot</code> (в стеке перезагрузятся все члены). Прежний файл: <code>${esc(lr.previous)}</code>.</div>
+      <div class="ip"><button class="btn small" data-restore-undo>Отменить восстановление (вернуть ${esc(lr.previous.replace(/^.*[\/:]/, ''))})</button></div>
+    </div>` : '';
+  const vs = (HIST && HIST.versions) || [];
+  if (!vs.length) { $('#backupList').innerHTML = '<p class="muted" style="margin:0">Версий пока нет. Нажмите «Сделать резервную копию».</p>'; return; }
+  const pinned = vs.filter(v => v.pinned);
+  const rows = [...pinned, ...vs.filter(v => !v.pinned).slice(0, 10)];
+  const base = `api/switches/${encodeURIComponent(sw.id)}/history/`;
+  $('#backupList').innerHTML = `<div class="table-scroll"><table class="tbl static"><thead><tr><th>Дата</th><th>Строк</th><th>Отметка</th><th>Скачать</th><th></th></tr></thead><tbody>
+    ${rows.map((v, i) => `<tr>
+      <td>${esc(new Date(v.ts).toLocaleString('ru-RU'))}${v.ts === vs[0].ts ? ' <span class="flag">текущая</span>' : ''}</td>
+      <td>${v.lines}</td>
+      <td>${v.pinned ? `📌 ${esc(v.note || 'Резервная копия')} <button class="plink" data-unpin="${esc(v.ts)}" title="Снять закрепление: версия сможет удалиться при очистке">открепить</button>` : '<span class="muted">версия из истории</span>'}</td>
+      <td><a class="plink" href="${base}${encodeURIComponent(v.ts)}?download=1" title="Пароли и ключи скрыты">.cfg</a> · <a class="plink" href="${base}${encodeURIComponent(v.ts)}?download=1&raw=1" title="Полная копия с зашифрованными паролями — для восстановления вручную">с паролями</a></td>
+      <td>${v.ts === vs[0].ts ? '' : `<button class="btn small" data-restore="${esc(v.ts)}">Восстановить…</button>`}</td>
+    </tr>`).join('')}
+  </tbody></table></div>${vs.length > rows.length ? `<p class="hint" style="margin:8px 0 0">Показаны закреплённые копии и 10 последних версий. Все версии — в блоке «Что изменилось» ниже.</p>` : ''}`;
+}
+
+async function makeBackup() {
+  const btn = $('#backupBtn');
+  const id = HIST && HIST.sw;
+  if (!id) return;
+  btn.disabled = true; btn.classList.add('spin');
+  toast('Забираю конфигурацию…');
+  try {
+    const r = await apiCall('POST', `api/switches/${encodeURIComponent(id)}/backup`, {});
+    toast(`Резервная копия сохранена: ${r.version.lines} строк${r.changed ? '' : ' (конфигурация не менялась)'}`, 'ok');
+    await loadSwitches();
+    selectSwitch(state.current, 'history');
+  } catch (e) { toast(e.message, 'err'); }
+  btn.disabled = false; btn.classList.remove('spin');
+}
+
+let RESTORE = null; // { sw, ts }
+async function openRestore(ts) {
+  const sw = SWITCHES.find(x => x.id === HIST.sw);
+  if (!sw) return;
+  RESTORE = { sw, ts };
+  const cur = HIST.versions[0];
+  openDrawer('Восстановление конфигурации', '<p class="muted">Сравниваю с текущей конфигурацией…</p>');
+  let st = null, preview = '';
+  try {
+    const [a, b] = await Promise.all([versionText(cur.ts), versionText(ts)]);
+    const ops = LineDiff.diffLines(a.replace(/\n$/, '').split('\n'), b.replace(/\n$/, '').split('\n'));
+    st = LineDiff.stats(ops);
+    preview = LineDiff.hunks(ops).slice(0, 8).map(h => h.lines.filter(l => l.op !== ' ').slice(0, 12).map(l => `<div class="dl dl-${l.op === '+' ? 'add' : 'del'}"><span class="ln"></span><span class="ln"></span><span class="dt">${l.op} ${esc(l.line)}</span></div>`).join('')).join('<div class="hunk-h">…</div>');
+  } catch (e) { preview = `<p class="muted">Не удалось сравнить: ${esc(e.message)}</p>`; }
+  $('#drawerBody').innerHTML = `
+    <dl class="kv">
+      <dt>Коммутатор</dt><dd><b>${esc(sw.name)}</b> <span class="mono muted">${esc(sw.host)}</span></dd>
+      <dt>Версия</dt><dd>${esc(new Date(ts).toLocaleString('ru-RU'))}</dd>
+      <dt>Текущая</dt><dd>${esc(new Date(cur.ts).toLocaleString('ru-RU'))}</dd>
+      ${st ? `<dt>Отличия</dt><dd>относительно текущей: <span class="d-add">+${st.added}</span> <span class="d-del">−${st.removed}</span> строк</dd>` : ''}
+    </dl>
+    ${preview ? `<div class="sub">Что изменится после перезагрузки</div><div class="diff" style="max-height:260px;overflow:auto">${preview}</div>` : ''}
+    <div class="sub">Что будет сделано</div>
+    <ol class="steps">
+      <li>Сделается свежая резервная копия текущей конфигурации.</li>
+      <li>Выбранная версия загрузится на flash коммутатора по SFTP отдельным файлом <code>restore_…cfg</code>. Текущий файл конфигурации не изменится.</li>
+      <li>Файл назначится конфигурацией для следующей загрузки: <code>startup saved-configuration restore_…cfg</code>, результат проверится через <code>display startup</code>.</li>
+      <li><b>Работающая конфигурация не меняется.</b> Новая применится только после перезагрузки, которую вы делаете сами (<code>reboot</code>) в окно обслуживания.</li>
+    </ol>
+    <p class="fix-w">⚠ После перезагрузки коммутатор будет недоступен несколько минут, все порты отключатся. Если в выбранной версии другой IP управления или учётные записи, связь с коммутатором может пропасть. До перезагрузки всё можно отменить кнопкой «Отменить восстановление».</p>
+    <label class="field">Для подтверждения введите название коммутатора: <b>${esc(sw.name)}</b>
+      <input id="restoreConfirm" data-name="${esc(sw.name)}" autocomplete="off" spellcheck="false">
+    </label>
+    <div class="form-actions"><button class="btn primary" id="restoreGo" disabled>Назначить восстановление</button><button class="btn ghost" data-std-cancel>Отмена</button></div>
+    <div id="restoreLog"></div>`;
+}
+
+async function doRestore() {
+  if (!RESTORE) return;
+  const btn = $('#restoreGo');
+  btn.disabled = true; btn.classList.add('spin');
+  $('#restoreLog').innerHTML = '<p class="muted">Выполняется — это займёт до минуты…</p>';
+  try {
+    const r = await apiCall('POST', `api/switches/${encodeURIComponent(RESTORE.sw.id)}/restore`, { ts: RESTORE.ts, confirm: $('#restoreConfirm').value });
+    $('#restoreLog').innerHTML = `<ul class="std-rules">${(r.log || []).map(l => `<li class="${l.ok ? 'ok' : 'bad'}"><span class="mark">${l.ok ? '✓' : '✗'}</span><div class="grow">${esc(l.msg)}</div></li>`).join('')}</ul>` +
+      (r.ok ? `<p class="fix-n" style="color:var(--text)"><b>Готово.</b> Перезагрузите коммутатор в окно обслуживания: <code>reboot</code>. После загрузки проверьте <code>display startup</code> и нажмите «Обновить с коммутатора».</p>`
+        : `<p class="fix-w">Восстановление не назначено: ${esc(r.error || '')}. Работающая конфигурация не изменялась.</p>`);
+    await loadSwitches();
+    renderHistory(SWITCHES.find(x => x.id === RESTORE.sw.id));
+  } catch (e) {
+    $('#restoreLog').innerHTML = `<p class="fix-w">✗ ${esc(e.message)}</p>`;
+    btn.disabled = false;
+  }
+  btn.classList.remove('spin');
+}
+
+async function undoRestore() {
+  const sw = SWITCHES.find(x => x.id === (HIST && HIST.sw));
+  if (!sw) return;
+  toast('Возвращаю прежний файл конфигурации…');
+  try {
+    const r = await apiCall('POST', `api/switches/${encodeURIComponent(sw.id)}/restore/undo`, {});
+    toast(`Отменено: при загрузке будет ${r.next}`, 'ok');
+    await loadSwitches();
+    renderHistory(SWITCHES.find(x => x.id === sw.id));
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 function renderSwEvents() {
@@ -2255,6 +2364,12 @@ function bind() {
       openPort(gt.dataset.gotoPort);
       return;
     }
+    const rb = e.target.closest('[data-restore]');
+    if (rb) { openRestore(rb.dataset.restore); return; }
+    if (e.target.closest('#restoreGo')) { doRestore(); return; }
+    if (e.target.closest('[data-restore-undo]')) { undoRestore(); return; }
+    const up = e.target.closest('[data-unpin]');
+    if (up) { apiCall('POST', `api/switches/${encodeURIComponent(HIST.sw)}/history/${encodeURIComponent(up.dataset.unpin)}/unpin`, {}).then(() => renderHistory(SWITCHES.find(x => x.id === HIST.sw))).catch(err => toast(err.message, 'err')); return; }
     const vb = e.target.closest('[data-ver-a]');
     if (vb) { $('#verA').value = vb.dataset.verA; $('#verB').value = vb.dataset.verB; showDiff(); $('#cfgDiff').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
     const rs = e.target.closest('[data-refresh-sw]');
@@ -2290,6 +2405,8 @@ function bind() {
 
   $('#swSelect').addEventListener('change', e => { selectSwitch(e.target.value); window.scrollTo(0, 0); });
   $('#evFilter').addEventListener('change', renderSwEvents);
+  $('#backupBtn').addEventListener('click', makeBackup);
+  $('#drawerBody').addEventListener('input', e => { if (e.target.id === 'restoreConfirm') $('#restoreGo').disabled = e.target.value.trim() !== e.target.dataset.name; });
   $('#phoneSearch').addEventListener('input', renderPhoneTable);
   $('#cmeSearch').addEventListener('input', renderCmeTable);
   $('#cmeFilter').addEventListener('change', renderCmeTable);

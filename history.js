@@ -44,9 +44,40 @@ function addConfigVersion(id, text, ts = new Date().toISOString()) {
   const file = tsFile(ts);
   fs.writeFileSync(path.join(cfgDir(id), file), text);
   index.unshift({ ts, file, lines: text.split('\n').length - 1, added: st ? st.added : null, removed: st ? st.removed : null });
-  for (const old of index.splice(MAX_VERSIONS)) fs.rm(path.join(cfgDir(id), old.file), { force: true }, () => {});
+  // Удаляем самые старые версии сверх лимита, кроме закреплённых резервных копий
+  let excess = index.length - MAX_VERSIONS;
+  for (let i = index.length - 1; i >= 0 && excess > 0; i--) {
+    if (index[i].pinned) continue;
+    fs.rm(path.join(cfgDir(id), index[i].file), { force: true }, () => {});
+    index.splice(i, 1);
+    excess--;
+  }
   writeJson(indexPath(id), index);
   return st;
+}
+
+// Отметить версию как резервную копию (не удаляется автоматически)
+function pinVersion(id, ts, note) {
+  const index = listVersions(id);
+  const v = index.find(x => x.ts === ts);
+  if (!v) return null;
+  // Уже закреплённая версия сохраняет свою отметку
+  if (!v.pinned) {
+    v.pinned = true;
+    v.note = note || 'Резервная копия';
+    v.pinnedAt = new Date().toISOString();
+  }
+  writeJson(indexPath(id), index);
+  return v;
+}
+
+function unpinVersion(id, ts) {
+  const index = listVersions(id);
+  const v = index.find(x => x.ts === ts);
+  if (!v) return null;
+  delete v.pinned; delete v.note; delete v.pinnedAt;
+  writeJson(indexPath(id), index);
+  return v;
 }
 
 // Первая версия из уже имеющегося конфига (до появления истории)
@@ -175,6 +206,6 @@ function onState(sw, prev, cur, configText, directory) {
 }
 
 module.exports = {
-  listVersions, readVersion, addConfigVersion, seedConfig, removeSwitch,
+  listVersions, readVersion, addConfigVersion, seedConfig, removeSwitch, pinVersion, unpinVersion,
   addEvent, readEvents, loadDevices, onState,
 };

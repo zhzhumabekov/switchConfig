@@ -482,3 +482,7 @@ a.btn { text-decoration: none; }
 .m-sw.ok { border-color: #2e8b57; } .m-sw.warn { border-color: var(--sev-med); } .m-sw.err { border-color: var(--sev-high); border-style: dashed; } .m-sw.ext { border-color: var(--muted); border-style: dashed; }
 .m-ln { width: 18px; height: 0; border-top: 2px solid #2e8b57; display: inline-block; }
 .m-ln.down { border-top: 2px dashed var(--sev-high); }
+
+/* ---------- резервные копии ---------- */
+.steps { margin: 0 0 10px; padding-left: 20px; font-size: 13px; }
+.steps li { margin-bottom: 4px; }
