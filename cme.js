@@ -30,13 +30,14 @@ function parseConfig(text) {
   for (const raw of lines(text)) {
     const l = raw.replace(/\s+$/, '');
     let m;
-    if ((m = l.match(/^ephone-dn\s+(\d+)/))) { cur = dn[m[1]] = { id: +m[1], numbers: [] }; continue; }
-    if ((m = l.match(/^ephone\s+(\d+)/))) { cur = ephones[m[1]] = { id: +m[1], buttons: [] }; continue; }
-    if ((m = l.match(/^voice register dn\s+(\d+)/))) { cur = sipDn[m[1]] = { id: +m[1], numbers: [] }; continue; }
-    if ((m = l.match(/^voice register pool\s+(\d+)/))) { cur = sipPools[m[1]] = { id: +m[1], dns: [] }; continue; }
+    if ((m = l.match(/^ephone-dn\s+(\d+)/))) { cur = dn[m[1]] = { id: +m[1], numbers: [], lines: [], head: l.trim() }; continue; }
+    if ((m = l.match(/^ephone\s+(\d+)/))) { cur = ephones[m[1]] = { id: +m[1], buttons: [], lines: [] }; continue; }
+    if ((m = l.match(/^voice register dn\s+(\d+)/))) { cur = sipDn[m[1]] = { id: +m[1], numbers: [], lines: [] }; continue; }
+    if ((m = l.match(/^voice register pool\s+(\d+)/))) { cur = sipPools[m[1]] = { id: +m[1], dns: [], lines: [] }; continue; }
     if (/^\S/.test(l)) { cur = null; continue; }
     if (!cur) continue;
     const t = l.trim();
+    if (t && t !== '!') cur.lines.push(t);
     if ((m = t.match(/^number\s+(\S+)(?:\s+secondary\s+(\S+))?/)) && cur.numbers) { cur.numbers.push(m[1]); if (m[2]) cur.numbers.push(m[2]); }
     else if ((m = t.match(/^number\s+\d+\s+dn\s+(\d+)/)) && cur.dns) cur.dns.push(+m[1]);
     else if ((m = t.match(/^name\s+(.+)/))) cur.name = m[1].replace(/^"|"$/g, '');
@@ -125,6 +126,7 @@ function parseAll(raw, at = new Date().toISOString()) {
     return {
       numbers: [...new Set(list.flatMap(d => d.numbers))],
       names: [...new Set(list.flatMap(d => [d.name, d.label]).filter(Boolean))],
+      dns: list.map(d => ({ id: d.id, numbers: d.numbers, name: d.name || '', label: d.label || '', description: d.description || '', head: d.head || '', lines: d.lines || [] })),
     };
   };
 
@@ -136,8 +138,9 @@ function parseAll(raw, at = new Date().toISOString()) {
     const mac = c.mac || s.mac;
     if (!mac) continue;
     phones.push({
-      proto: 'sccp', id: `ephone ${id}`, mac, model: c.model || s.model || '', ip: s.ip || '',
+      proto: 'sccp', id: `ephone ${id}`, ref: +id, mac, model: c.model || s.model || '', ip: s.ip || '',
       status: s.status || 'unknown', numbers: d.numbers.length ? d.numbers : (s.numbers || []), names: d.names, description: c.description || '',
+      buttons: c.buttons || [], dns: d.dns, lines: c.lines || [],
     });
   }
   // SIP (voice register pool)
@@ -147,11 +150,23 @@ function parseAll(raw, at = new Date().toISOString()) {
     const mac = c.mac || s.mac;
     if (!mac) continue;
     phones.push({
-      proto: 'sip', id: `pool ${id}`, mac, model: c.model || '', ip: s.ip || '',
+      proto: 'sip', id: `pool ${id}`, ref: +id, mac, model: c.model || '', ip: s.ip || '',
       status: s.status || 'unknown', numbers: d.numbers, names: d.names, description: c.description || '',
+      buttons: c.dns || [], dns: d.dns, lines: c.lines || [],
     });
   }
-  return { at, kind: 'cme', phones, errors };
+  // Занятые идентификаторы и номера — чтобы предложить свободные для нового телефона
+  const used = {
+    ephone: [...new Set(Object.keys(cfg.ephones).map(Number).concat(Object.keys(eph).map(Number)))],
+    ephoneDn: Object.keys(cfg.dn).map(Number),
+    pool: Object.keys(cfg.sipPools).map(Number),
+    sipDn: Object.keys(cfg.sipDn).map(Number),
+    numbers: [...new Set([...Object.values(cfg.dn), ...Object.values(cfg.sipDn)].flatMap(d => d.numbers))],
+  };
+  // Номера без телефона (ephone-dn, не назначенные ни на одну кнопку)
+  const assigned = new Set(Object.values(cfg.ephones).flatMap(e => e.buttons));
+  const freeDns = Object.values(cfg.dn).filter(d => !assigned.has(d.id)).map(d => ({ id: d.id, numbers: d.numbers, name: d.name || '', label: d.label || '' }));
+  return { at, kind: 'cme', phones, used, freeDns, errors };
 }
 
 module.exports = { COMMANDS, parseAll, parseConfig, parseEphone, parseSip, normMac, redact };

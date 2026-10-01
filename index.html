@@ -11,7 +11,7 @@
 <header class="top">
   <div class="wrap top-inner">
     <div class="ident">
-      <div class="eyebrow">Huawei · стек коммутаторов</div>
+      <div class="eyebrow" id="eyebrow">Huawei · стек коммутаторов</div>
       <h1 id="sysname">—</h1>
       <div class="meta" id="meta"></div>
     </div>
@@ -42,6 +42,41 @@
 </header>
 
 <main class="wrap">
+
+  <!-- ТЕЛЕФОНЫ (Cisco CME) -->
+  <section class="tab" id="tab-cme" hidden>
+    <div class="card">
+      <div class="card-head">
+        <h2>Телефоны</h2>
+        <div class="controls">
+          <input type="search" id="cmeSearch" placeholder="Номер, имя, MAC, IP, порт…">
+          <select id="cmeFilter">
+            <option value="">Все</option>
+            <option value="unreg">Не зарегистрированы</option>
+            <option value="nowhere">Не найдены на коммутаторах</option>
+            <option value="sip">Только SIP</option>
+          </select>
+          <button class="btn primary" data-new-phone>+ Новый телефон</button>
+        </div>
+      </div>
+      <p class="hint">Нажмите на телефон, чтобы увидеть все его настройки и получить команды для изменения. Команды только показываются — выполните их на роутере сами и сохраните: <code>write memory</code>.</p>
+      <div class="table-scroll"><table class="tbl" id="cmeTable"></table></div>
+      <div class="foot" id="cmeFoot"></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Свободные номера <span class="count" id="freeDnCount"></span></h2>
+        <p class="hint">Номера (ephone-dn), которые не назначены ни на один телефон.</p>
+        <div id="freeDns"></div>
+      </div>
+      <div class="card">
+        <h2>Телефоны на портах, которых нет в CME <span class="count" id="candCount"></span></h2>
+        <p class="hint">MAC-адреса в голосовом VLAN на пользовательских портах, которые не зарегистрированы в CME. Возможно, это новые телефоны — их можно добавить.</p>
+        <div id="phoneCands"></div>
+      </div>
+    </div>
+    <p class="hint" id="cmeNote"></p>
+  </section>
 
   <!-- ВСЕ КОММУТАТОРЫ -->
   <section class="tab" id="tab-all" hidden>
@@ -306,6 +341,7 @@
 <script src="diff.js"></script>
 <script src="fixes.js"></script>
 <script src="standard.js"></script>
+<script src="cme-cmd.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

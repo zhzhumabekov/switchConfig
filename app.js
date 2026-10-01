@@ -526,6 +526,8 @@ function unknownHtml(list, withSwitch) {
 
 function render(cfg, sw = null) {
   CFG = cfg;
+  $('#tab-cme').hidden = true;
+  $('#eyebrow').textContent = 'Huawei · стек коммутаторов';
   if (!cfg.issues) prepare(cfg);
   $('#tab-all').hidden = true;
   $('#tabs').hidden = false;
@@ -1097,7 +1099,7 @@ async function loadSwitches() {
   CMES = await Promise.all(all.filter(x => x.type === 'cisco-cme').map(async x => {
     let st = null;
     if (x.stateAt) { try { st = await apiCall('GET', `api/switches/${encodeURIComponent(x.id)}/state`); } catch (e) { /* нет данных */ } }
-    return { ...x, phones: (st && st.phones) || [], cmeErrors: (st && st.errors) || {}, cmeAt: st && st.at };
+    return { ...x, state: st, phones: (st && st.phones) || [], cmeErrors: (st && st.errors) || {}, cmeAt: st && st.at };
   }));
   PHONES = new Map();
   for (const c of CMES) for (const p of c.phones) PHONES.set(p.mac, { ...p, cme: c });
@@ -1127,11 +1129,21 @@ async function loadSwitches() {
 function fillSwitchSelect() {
   const sel = $('#swSelect');
   sel.innerHTML = `<option value="all">Все коммутаторы (${SWITCHES.length})</option>` +
-    SWITCHES.map(s => `<option value="${esc(s.id)}" ${s.cfg ? '' : 'disabled'}>${esc(s.name)}${s.cfg ? '' : ' — нет данных'}</option>`).join('');
+    SWITCHES.map(s => `<option value="${esc(s.id)}" ${s.cfg ? '' : 'disabled'}>${esc(s.name)}${s.cfg ? '' : ' — нет данных'}</option>`).join('') +
+    (CMES.length ? `<optgroup label="Телефония">${CMES.map(c => `<option value="cme:${esc(c.id)}">☎ ${esc(c.name)}</option>`).join('')}</optgroup>` : '');
   sel.value = state.current || 'all';
 }
 
 function selectSwitch(id, tab) {
+  if (String(id || '').startsWith('cme:') && CMES.some(c => 'cme:' + c.id === id)) {
+    if (id !== state.current) closeDrawer();
+    state.current = id;
+    try { localStorage.setItem('swcfg-current', id); } catch (e) { /* нет доступа */ }
+    $('#swSelect').value = id;
+    $('#refreshBtn').textContent = 'Обновить с роутера';
+    renderCme(CMES.find(c => 'cme:' + c.id === id));
+    return;
+  }
   const sw = SWITCHES.find(s => s.id === id);
   if (!sw || !sw.cfg) id = 'all';
   if (id !== state.current) { state.profile = null; state.panelVlan = ''; closeDrawer(); }
@@ -1146,6 +1158,8 @@ function selectSwitch(id, tab) {
 
 function renderAll() {
   CFG = null;
+  $('#tab-cme').hidden = true;
+  $('#eyebrow').textContent = 'Huawei · стек коммутаторов';
   $('#tabs').hidden = true;
   $$('.tab').forEach(s => { s.hidden = s.id !== 'tab-all'; });
   setHash();
@@ -1262,7 +1276,9 @@ function renderAll() {
 async function refresh(id) {
   const btn = $('#refreshBtn');
   const all = id === 'all';
-  const targets = all ? SWITCHES.filter(s => s.hasPassword) : SWITCHES.filter(s => s.id === id);
+  const cmeId = String(id).startsWith('cme:') ? id.slice(4) : null;
+  if (cmeId) id = cmeId;
+  const targets = all ? SWITCHES.filter(s => s.hasPassword) : [...SWITCHES, ...CMES].filter(s => s.id === id);
   if (!targets.length || targets.some(s => !s.hasPassword)) { toast('Пароль не сохранён — укажите его в настройках', 'err'); return; }
   btn.disabled = true; btn.classList.add('spin');
   targets.forEach(s => { s.busy = true; });
@@ -1272,12 +1288,13 @@ async function refresh(id) {
     const res = all ? await apiCall('POST', 'api/fetch-all', {}) : { [id]: await apiCall('POST', `api/switches/${encodeURIComponent(id)}/fetch`, {}) };
     const vals = Object.entries(res);
     const bad = vals.filter(([, r]) => !r.ok);
-    if (!bad.length) toast(all ? `Обновлено: ${vals.length}` : (vals[0][1].changed ? 'Конфигурация обновлена' : 'Конфигурация не изменилась'), 'ok');
+    if (!bad.length) toast(all ? `Обновлено: ${vals.length}` : vals[0][1].phones != null ? `Телефонов: ${vals[0][1].phones}, зарегистрировано ${vals[0][1].registered}` : (vals[0][1].changed ? 'Конфигурация обновлена' : 'Конфигурация не изменилась'), 'ok');
     else toast(bad.map(([k, r]) => `${(SWITCHES.find(s => s.id === k) || {}).name || k}: ${r.error}`).join('; '), 'err');
   } catch (e) { toast(e.message, 'err'); }
   await loadSwitches().catch(e => toast(e.message, 'err'));
   btn.disabled = false; btn.classList.remove('spin');
   selectSwitch(state.current);
+  if (cmeId) toast('Данные о телефонах обновлены', 'ok');
 }
 
 /* ---------- поиск «где подключено устройство» ---------- */
@@ -1577,7 +1594,7 @@ function renderPhoneTable() {
   const total = CMES.reduce((n, c) => n + c.phones.length, 0);
   const reg = CMES.reduce((n, c) => n + c.phones.filter(p => p.status === 'registered').length, 0);
   $('#phoneTable').innerHTML = `<thead><tr><th>Номер</th><th>Имя / подпись</th><th>Модель</th><th>Статус</th><th>IP</th><th>MAC</th><th>Подключён</th></tr></thead><tbody>` +
-    rows.slice(0, 500).map(({ ph, loc, last }) => `<tr ${loc ? `data-goto-sw="${esc(loc.sw ? loc.sw.id : '')}" data-goto-port="${esc(loc.p.name)}"` : ''}>
+    rows.slice(0, 500).map(({ c, ph, loc, last }) => `<tr data-open-phone="${esc(c.id)}|${esc(ph.mac)}">
       <td class="mono"><b>${esc(ph.numbers.join(', ') || '—')}</b></td>
       <td>${esc(ph.names.join(' · ') || '—')}${ph.description ? `<div class="muted" style="font-size:12px">${esc(ph.description)}</div>` : ''}</td>
       <td>${esc(ph.model || '—')} <span class="muted">${ph.proto.toUpperCase()}</span></td>
@@ -1590,6 +1607,233 @@ function renderPhoneTable() {
     </tr>`).join('') + '</tbody>';
   const found = rows.filter(r => r.loc).length;
   $('#phoneFoot').textContent = `Всего ${total}, зарегистрировано ${reg}. Показано ${Math.min(rows.length, 500)}, из них найдено на портах ${found}.`;
+}
+
+/* ---------- раздел «Телефоны» одного роутера CME ---------- */
+let CME = null; // выбранный роутер
+
+function openDrawer(title, html) {
+  $('#drawerTitle').textContent = title;
+  $('#drawerBody').innerHTML = html;
+  $('#drawer').classList.add('open');
+  $('#drawer').setAttribute('aria-hidden', 'false');
+  $('#scrim').hidden = false;
+}
+
+function renderCme(c) {
+  CME = c;
+  CFG = null;
+  $('#tabs').hidden = true;
+  $$('.tab').forEach(s => { s.hidden = s.id !== 'tab-cme'; });
+  $('#eyebrow').textContent = 'Cisco CME · телефония';
+  setHash();
+  $('#sysname').textContent = c.name;
+  document.title = `${c.name} — телефоны`;
+  const reg = c.phones.filter(p => p.status === 'registered').length;
+  $('#meta').innerHTML = [
+    `<span>Cisco CME · IP <b>${esc(c.host)}</b></span>`,
+    c.cmeAt ? `<span>Обновлено <b>${esc(ago(c.cmeAt))}</b></span>` : '<span>данные ещё не загружены</span>',
+    `<span><b>${c.phones.length}</b> ${plural(c.phones.length, 'телефон', 'телефона', 'телефонов')}, зарегистрировано <b>${reg}</b></span>`,
+    c.lastError ? `<span style="color:var(--sev-high)">Ошибка: ${esc(c.lastError.message)}</span>` : '',
+  ].join('');
+  renderCmeTable();
+
+  const st = c.state || {};
+  const free = st.freeDns || [];
+  $('#freeDnCount').textContent = free.length || '';
+  $('#freeDns').innerHTML = free.length ? `<ul class="list">${free.slice(0, 100).map(d => `<li><span class="mono"><b>${esc(d.numbers.join(', ') || '—')}</b></span>
+      <span class="grow">${esc([d.name, d.label].filter(Boolean).join(' · '))} <span class="muted">ephone-dn ${d.id}</span></span></li>`).join('')}</ul>`
+    : '<p class="muted" style="margin:0">Свободных номеров нет.</p>';
+
+  const cands = phoneCandidates();
+  $('#candCount').textContent = cands.length || '';
+  $('#phoneCands').innerHTML = cands.length ? `<ul class="list">${cands.slice(0, 100).map(x => `<li>
+      <span class="mono">${esc(x.m.mac)}</span>
+      <span class="grow"><b>${esc(x.sw.name)}</b> · <button class="plink" data-goto-sw="${esc(x.sw.id)}" data-goto-port="${esc(x.p.name)}">${esc(x.p.short)}</button> <span class="muted">VLAN ${x.m.vlan}${x.p.desc ? ' · ' + esc(x.p.desc) : ''}</span></span>
+      <button class="btn small" data-new-phone="${esc(x.m.mac)}">Добавить</button></li>`).join('')}</ul>`
+    : `<p class="muted" style="margin:0">${liveSources().length ? 'Таких нет — все MAC в голосовом VLAN известны CME.' : 'Нет данных о портах коммутаторов.'}</p>`;
+
+  const errs = Object.keys(c.cmeErrors || {});
+  $('#cmeNote').textContent = errs.length ? `Не выполнились команды: ${errs.join(', ')}.${errs.some(x => /running-config/.test(x)) ? ' Без show running-config нет подписей и имён — укажите пароль enable в настройках.' : ''}` : '';
+}
+
+// MAC на конечных портах в голосовом VLAN, которых нет в CME
+function phoneCandidates() {
+  const out = [];
+  for (const { sw, cfg } of liveSources()) {
+    for (const p of cfg.ports) {
+      if (!p.macs || !p.voiceVlan || !isEdgePort(p)) continue;
+      for (const m of p.macs) if (m.vlan === p.voiceVlan && !(PHONES && PHONES.has(m.mac))) out.push({ sw, cfg, p, m });
+    }
+  }
+  return out;
+}
+
+function renderCmeTable() {
+  const c = CME;
+  if (!c) return;
+  const q = $('#cmeSearch').value.trim().toLowerCase();
+  const f = $('#cmeFilter').value;
+  const rows = [];
+  for (const ph of c.phones) {
+    const loc = locateMac(ph.mac);
+    if (f === 'unreg' && ph.status === 'registered') continue;
+    if (f === 'nowhere' && loc) continue;
+    if (f === 'sip' && ph.proto !== 'sip') continue;
+    if (q) {
+      const hay = [ph.numbers.join(' '), ph.names.join(' '), ph.description, ph.mac, ph.mac.replace(/-/g, ''), ph.ip, ph.model, ph.id, loc && loc.p.short, loc && loc.sw && loc.sw.name].join(' ').toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+    rows.push({ ph, loc });
+  }
+  rows.sort((a, b) => String(a.ph.numbers[0] || '~').localeCompare(String(b.ph.numbers[0] || '~'), 'ru', { numeric: true }));
+  $('#cmeTable').innerHTML = `<thead><tr><th>Номер</th><th>Имя / подпись</th><th>Описание</th><th>Модель</th><th>Статус</th><th>IP</th><th>Подключён</th><th></th></tr></thead><tbody>` +
+    rows.map(({ ph, loc }) => `<tr data-open-phone="${esc(c.id)}|${esc(ph.mac)}">
+      <td class="mono"><b>${esc(ph.numbers.join(', ') || '—')}</b></td>
+      <td>${esc(ph.names.join(' · ') || '—')}</td>
+      <td class="muted">${esc(ph.description || '')}</td>
+      <td>${esc(ph.model || '—')} <span class="muted">${ph.proto.toUpperCase()}</span></td>
+      <td>${phoneStatus(ph)}</td>
+      <td class="mono">${esc(ph.ip || '—')}</td>
+      <td>${loc ? `<b>${esc(loc.sw ? loc.sw.name : '')}</b> · <span class="mono">${esc(loc.p.short)}</span>` : '<span class="muted">—</span>'}</td>
+      <td class="muted mono">${esc(ph.id)}</td>
+    </tr>`).join('') + '</tbody>';
+  $('#cmeFoot').textContent = `Показано ${rows.length} из ${c.phones.length}`;
+}
+
+function phoneStatus(ph) {
+  return ph.status === 'registered' ? '<span class="live live-up">зарегистрирован</span>'
+    : `<span class="flag warn">${esc(ph.status === 'unregistered' ? 'не зарегистрирован' : ph.status === 'deceased' ? 'пропал (deceased)' : 'неизвестно')}</span>`;
+}
+
+let PHONE_EDIT = null; // { c, ph }
+
+function phoneField(label, name, value, extra = '') {
+  return `<label class="field">${label}<input name="${name}" value="${esc(value || '')}" spellcheck="false" ${extra}></label>`;
+}
+function modelField(value) {
+  return `<label class="field">Модель (type)<input name="model" list="phoneModels" value="${esc(value || '')}" spellcheck="false">
+    <datalist id="phoneModels">${CmeCmd.MODELS.map(m => `<option value="${m}">`).join('')}</datalist></label>`;
+}
+
+function openPhone(mac) {
+  const c = CME;
+  const ph = c && c.phones.find(p => p.mac === mac);
+  if (!ph) return;
+  PHONE_EDIT = { c, ph };
+  const loc = locateMac(ph.mac);
+  const last = !loc && DEVICES && DEVICES.macs[ph.mac];
+  const dn = ph.dns[0];
+  const cfgText = [
+    ph.proto === 'sip' ? `voice register pool ${ph.ref}` : `ephone ${ph.ref}`, ...ph.lines.map(l => ' ' + l),
+    ...ph.dns.flatMap(d => ['!', d.head || (ph.proto === 'sip' ? `voice register dn ${d.id}` : `ephone-dn ${d.id}`), ...d.lines.map(l => ' ' + l)]),
+  ].join('\n');
+  openDrawer(`☎ ${ph.numbers.join(', ') || ph.id}${ph.names[0] ? ' · ' + ph.names[0] : ''}`, `
+    <dl class="kv">
+      <dt>Статус</dt><dd>${phoneStatus(ph)}</dd>
+      <dt>Телефон</dt><dd class="mono">${esc(ph.id)} · ${ph.proto.toUpperCase()}</dd>
+      <dt>Модель</dt><dd>${esc(ph.model || '—')}</dd>
+      <dt>MAC</dt><dd class="mono">${esc(CmeCmd.ciscoMac(ph.mac) || ph.mac)}</dd>
+      <dt>IP</dt><dd class="mono">${esc(ph.ip || '—')}</dd>
+      <dt>Подключён</dt><dd>${loc ? `<b>${esc(loc.sw ? loc.sw.name : '')}</b> · <button class="plink" data-goto-sw="${esc(loc.sw ? loc.sw.id : '')}" data-goto-port="${esc(loc.p.name)}">${esc(loc.p.short)}</button> <span class="muted">VLAN ${loc.m.vlan}${loc.p.desc ? ' · ' + esc(loc.p.desc) : ''}</span>`
+        : last ? `<span class="muted">последний раз: ${esc(last.swName || last.sw)} · ${esc(shortName(last.port))} · ${esc(fmtTime(last.lastSeen))}</span>` : '<span class="muted">не найден на коммутаторах</span>'}</dd>
+      <dt>Описание</dt><dd>${esc(ph.description || '—')}</dd>
+    </dl>
+    <div class="sub">Номера на кнопках</div>
+    ${ph.dns.length ? `<table class="tbl static"><thead><tr><th>Кнопка</th><th>Номер</th><th>Имя</th><th>Подпись</th><th>DN</th></tr></thead><tbody>
+      ${ph.dns.map((d, i) => `<tr><td>${i + 1}</td><td class="mono"><b>${esc(d.numbers.join(', '))}</b></td><td>${esc(d.name || '—')}</td><td>${esc(d.label || '—')}</td><td class="muted mono">${d.id}</td></tr>`).join('')}
+    </tbody></table>` : '<p class="muted">Нет данных о номерах (нужна show running-config — укажите пароль enable).</p>'}
+    <div class="sub">Конфигурация</div>
+    <pre>${esc(cfgText)}</pre>
+    <div class="sub">Изменить</div>
+    ${dn || ph.lines.length ? `<form id="phForm" class="std-form" autocomplete="off" onsubmit="return false">
+      ${dn ? phoneField('Номер (первая линия)', 'number', dn.numbers[0] || '', 'inputmode="numeric"') + phoneField('Имя (name — видно на экране вызываемого)', 'name', dn.name) + phoneField('Подпись кнопки (label)', 'label', dn.label) : ''}
+      ${phoneField('Описание телефона (description)', 'description', ph.description)}
+      ${modelField(ph.model)}
+      ${phoneField('MAC-адрес (при замене аппарата)', 'mac', CmeCmd.ciscoMac(ph.mac) || '')}
+      <div id="phOut"></div>
+    </form>` : '<p class="muted">Изменение недоступно: нет конфигурации телефона.</p>'}
+    <details class="fix"><summary>Перезагрузить телефон</summary>${cmdBox(CmeCmd.restart(ph))}</details>
+    <details class="fix"><summary>Удалить телефон</summary>
+      <p class="fix-w">⚠ Телефон перестанет работать. Вариант 2 удалит и его номера, если они не используются на других телефонах.</p>
+      <div class="fix-v"><div class="fix-t">Вариант 1. Только телефон (номер останется свободным)</div>${cmdBox(CmeCmd.remove(ph, false, c.phones))}</div>
+      <div class="fix-v"><div class="fix-t">Вариант 2. Телефон и его номера</div>${cmdBox(CmeCmd.remove(ph, true, c.phones))}</div>
+    </details>`);
+  updatePhoneCmds();
+}
+
+function formVals(form) {
+  const o = {};
+  for (const el of form.elements) if (el.name) o[el.name] = CmeCmd.clean(el.value);
+  return o;
+}
+
+function updatePhoneCmds() {
+  const form = $('#phForm');
+  if (!form || !PHONE_EDIT) return;
+  const { c, ph } = PHONE_EDIT;
+  const f = formVals(form);
+  const v = CmeCmd.validate(f, (c.state && c.state.used) || {}, ph);
+  const cmds = v.errors.length ? '' : CmeCmd.edit(ph, f);
+  $('#phOut').innerHTML = (v.errors.length ? `<p class="fix-w">✗ ${v.errors.map(esc).join('<br>✗ ')}</p>` : '') +
+    v.warnings.map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('') +
+    (cmds ? cmdBox(cmds) + `<p class="fix-n">Выполните на роутере и сохраните: <code>write memory</code>.${ph.proto === 'sccp' ? ' Команда restart перезапустит телефон, чтобы он получил новые настройки.' : ' Для SIP после изменений создаётся профиль (create profile); телефон может потребовать перезагрузки.'}</p>`
+      : (v.errors.length ? '' : '<p class="muted" style="margin:0">Измените поля выше — здесь появятся команды.</p>'));
+}
+
+function openNewPhone(mac) {
+  const c = CME || CMES[0];
+  if (!c) return;
+  if (!CME) selectSwitch('cme:' + c.id);
+  const used = (c.state && c.state.used) || {};
+  const free = (c.state && c.state.freeDns) || [];
+  const where = mac ? locateMac(mac) : null;
+  openDrawer('Новый телефон', `<form id="newPhForm" class="std-form" autocomplete="off" onsubmit="return false">
+    <p class="hint">Для SCCP-телефона (ephone). Номера ephone и ephone-dn подобраны свободные.</p>
+    ${phoneField('MAC-адрес телефона', 'mac', mac ? CmeCmd.ciscoMac(mac) : '', 'placeholder="0019.AA7B.1234"')}
+    ${where ? `<p class="fix-n">Этот MAC сейчас на ${esc(where.sw ? where.sw.name : '')} · ${esc(where.p.short)}${where.p.desc ? ' (' + esc(where.p.desc) + ')' : ''}.</p>` : ''}
+    ${modelField('')}
+    <label class="field">Номер
+      <select name="dnId"><option value="">Новый номер</option>${free.map(d => `<option value="${d.id}">Свободный: ${esc(d.numbers.join(', '))}${d.name ? ' · ' + esc(d.name) : ''} (ephone-dn ${d.id})</option>`).join('')}</select>
+    </label>
+    <div id="newDnFields">
+      ${phoneField('Внутренний номер', 'number', '', 'inputmode="numeric" placeholder="например, 2400"')}
+      ${phoneField('Имя (name)', 'name', '', 'placeholder="Ivanova Anna"')}
+      ${phoneField('Подпись кнопки (label)', 'label', '')}
+    </div>
+    ${phoneField('Описание телефона (description)', 'description', '', 'placeholder="kab 305"')}
+    <div class="row-chk muted" style="font-size:12.5px">ephone <input name="ephoneId" type="number" min="1" value="${CmeCmd.nextFree(used.ephone)}" style="width:80px">
+      ephone-dn <input name="newDnId" type="number" min="1" value="${CmeCmd.nextFree(used.ephoneDn)}" style="width:80px"></div>
+    <div id="newPhOut"></div>
+  </form>`);
+  PHONE_EDIT = { c, ph: null };
+  updateNewPhoneCmds();
+}
+
+function updateNewPhoneCmds() {
+  const form = $('#newPhForm');
+  if (!form || !PHONE_EDIT) return;
+  const { c } = PHONE_EDIT;
+  const used = (c.state && c.state.used) || {};
+  const f = formVals(form);
+  const existingDn = !!f.dnId;
+  $('#newDnFields').hidden = existingDn;
+  const check = { mac: f.mac, model: f.model, description: f.description, name: existingDn ? '' : f.name, label: existingDn ? '' : f.label };
+  if (!existingDn) check.number = f.number;
+  const v = CmeCmd.validate(check, used, null);
+  const errors = [...v.errors];
+  if (!f.mac) errors.push('Укажите MAC-адрес');
+  if ((used.ephone || []).includes(+f.ephoneId)) errors.push(`ephone ${f.ephoneId} уже занят`);
+  if (!existingDn && (used.ephoneDn || []).includes(+f.newDnId)) errors.push(`ephone-dn ${f.newDnId} уже занят`);
+  if (PHONES && f.mac && CmeCmd.ciscoMac(f.mac)) {
+    const h = f.mac.replace(/[^0-9a-f]/gi, '').toLowerCase();
+    const dup = [...PHONES.values()].find(p => p.mac.replace(/-/g, '') === h);
+    if (dup) errors.push(`Телефон с этим MAC уже есть: ${dup.id} (${dup.numbers.join(', ')})`);
+  }
+  const r = errors.length ? null : CmeCmd.create({ ...f, ephoneId: +f.ephoneId, newDnId: +f.newDnId, dnId: f.dnId ? +f.dnId : null }, used);
+  $('#newPhOut').innerHTML = (errors.length ? `<p class="fix-w">✗ ${errors.map(esc).join('<br>✗ ')}</p>` : '') +
+    v.warnings.map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('') +
+    (r ? cmdBox(r.commands) + '<p class="fix-n">Выполните на роутере и сохраните: <code>write memory</code>. Телефон зарегистрируется после подключения к сети (для 79xx может понадобиться прошивка на TFTP).</p>' : '');
 }
 
 /* ---------- оборудование и схема сети (этап 5) ---------- */
@@ -1956,7 +2200,7 @@ async function saveStdForm() {
 }
 
 function setHash() {
-  const h = SERVER ? (state.current === 'all' ? 'all' : `${state.current}/${state.tab}`) : state.tab;
+  const h = SERVER ? (state.current === 'all' || String(state.current).startsWith('cme:') ? state.current : `${state.current}/${state.tab}`) : state.tab;
   try { history.replaceState(null, '', '#' + h); } catch (e) { /* file:// в некоторых браузерах */ }
 }
 
@@ -1985,6 +2229,15 @@ function bind() {
   $('#drawerBody').addEventListener('input', e => { if (e.target.id === 'tplDesc') updatePortTool(); });
 
   document.addEventListener('click', e => {
+    const op = e.target.closest('[data-open-phone]');
+    if (op && !e.target.closest('[data-goto-port]')) {
+      const [cid, mac] = op.dataset.openPhone.split('|');
+      if (state.current !== 'cme:' + cid) { selectSwitch('cme:' + cid); window.scrollTo(0, 0); }
+      openPhone(mac);
+      return;
+    }
+    const np = e.target.closest('[data-new-phone]');
+    if (np) { openNewPhone(np.dataset.newPhone && np.dataset.newPhone !== 'true' ? np.dataset.newPhone : ''); return; }
     if (e.target.closest('[data-std-edit]')) { openStdEditor(STD); return; }
     if (e.target.closest('[data-std-create]')) { openStdEditor(Standard.derive(CFG, (SWITCHES.find(x => x.id === state.current) || {}).name)); return; }
     if (e.target.closest('[data-std-fill]')) { if (CFG) fillStdForm(Standard.derive(CFG, (SWITCHES.find(x => x.id === state.current) || {}).name)); return; }
@@ -2038,6 +2291,10 @@ function bind() {
   $('#swSelect').addEventListener('change', e => { selectSwitch(e.target.value); window.scrollTo(0, 0); });
   $('#evFilter').addEventListener('change', renderSwEvents);
   $('#phoneSearch').addEventListener('input', renderPhoneTable);
+  $('#cmeSearch').addEventListener('input', renderCmeTable);
+  $('#cmeFilter').addEventListener('change', renderCmeTable);
+  $('#drawerBody').addEventListener('input', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });
+  $('#drawerBody').addEventListener('change', e => { if (e.target.closest('#phForm')) updatePhoneCmds(); if (e.target.closest('#newPhForm')) updateNewPhoneCmds(); });
   $('#phoneFilter').addEventListener('change', renderPhoneTable);
   ['#verA', '#verB', '#diffFull'].forEach(id => $(id).addEventListener('change', showDiff));
   $('#refreshBtn').addEventListener('click', () => refresh(state.current));
