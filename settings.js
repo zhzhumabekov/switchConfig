@@ -62,7 +62,7 @@ function renderList() {
     else if (s.hasConfig) cfg = `<span class="flag">загружена</span> <span class="muted">${esc(ago(s.lastFetch))}${s.source && !s.hasPassword ? ' · ' + esc(s.source) : ''}</span>`;
     else cfg = '<span class="muted">ещё не загружена</span>';
     return `<tr data-id="${esc(s.id)}">
-      <td><b>${esc(s.name)}</b>${s.type === 'cisco-cme' ? ' <span class="flag">Cisco CME</span>' : ''}${s.sysname && s.sysname !== s.name ? `<div class="muted mono">${esc(s.sysname)}</div>` : ''}</td>
+      <td><b>${esc(s.name)}</b>${{ 'cisco-cme': ' <span class="flag">Cisco CME</span>', 'cisco-ios': ' <span class="flag">Cisco</span>', 'huawei-ac': ' <span class="flag">Контроллер Wi‑Fi</span>' }[s.type] || ''}${s.sysname && s.sysname !== s.name ? `<div class="muted mono">${esc(s.sysname)}</div>` : ''}</td>
       <td class="mono">${esc(s.host)}${s.port !== 22 ? ':' + s.port : ''}</td>
       <td class="mono">${esc(s.user)}</td>
       <td>${s.hasPassword ? '<span class="flag">сохранён</span>' : '<span class="flag warn">не задан</span>'}</td>
@@ -162,8 +162,8 @@ async function testConn(body, report) {
 
 /* ---------- события ---------- */
 function toggleType() {
-  const cme = $('#swForm').elements.type.value === 'cisco-cme';
-  $('#enableField').hidden = !cme;
+  const type = $('#swForm').elements.type.value, cme = type === 'cisco-cme';
+  $('#enableField').hidden = !/^cisco/.test(type);
   $('#saveFetch').textContent = cme ? 'Сохранить и забрать данные о телефонах' : 'Сохранить и забрать конфигурацию';
 }
 $('#swForm').elements.type.addEventListener('change', toggleType);

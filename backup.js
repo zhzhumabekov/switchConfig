@@ -18,10 +18,11 @@ function update(id, fn) {
   return cur;
 }
 
-function getSwitch(id) {
+function getSwitch(id, restore = false) {
   const sw = store.load().find(s => s.id === id);
   if (!sw) throw new UserError('Коммутатор не найден', 404);
-  if (sw.type === 'cisco-cme') throw new UserError('Резервные копии и восстановление доступны только для коммутаторов Huawei');
+  if (sw.type === 'cisco-cme') throw new UserError('Резервные копии доступны только для коммутаторов и контроллера');
+  if (restore && sw.type && sw.type !== 'huawei') throw new UserError('Восстановление конфигурации из приложения доступно только для коммутаторов Huawei');
   return sw;
 }
 
@@ -66,7 +67,7 @@ function memberSlots(id) {
 
 /* ---------- восстановление ---------- */
 async function restore(id, ts, confirmName) {
-  const sw = getSwitch(id);
+  const sw = getSwitch(id, true);
   if (String(confirmName || '').trim() !== sw.name) throw new UserError(`Для подтверждения введите название коммутатора точно: «${sw.name}»`);
   if (!sw.secret) throw new UserError('Пароль не сохранён — укажите его в настройках');
   const text = history.readVersion(id, ts);
@@ -130,7 +131,7 @@ async function restore(id, ts, confirmName) {
 
 // Вернуть прежний файл конфигурации для следующей загрузки
 async function undoRestore(id) {
-  const sw = getSwitch(id);
+  const sw = getSwitch(id, true);
   const lr = sw.lastRestore;
   if (!lr || lr.undone) throw new UserError('Нет назначенного восстановления, которое можно отменить');
   const password = await store.decrypt(sw.secret);

@@ -29,6 +29,7 @@
   </div>
   <nav class="tabs wrap" id="tabs">
     <button data-tab="overview" class="active">Обзор</button>
+    <button data-tab="wifi" id="wifiTabBtn" hidden>Wi‑Fi <span class="count" id="wifiCount"></span></button>
     <button data-tab="ports">Порты</button>
     <button data-tab="vlans">VLAN</button>
     <button data-tab="l3">L3 и маршруты</button>
@@ -118,6 +119,10 @@
     <div class="card" id="logAllCard" hidden>
       <h2>Журналы коммутаторов: главное</h2>
       <div class="table-scroll"><table class="tbl" id="logAll"></table></div>
+    </div>
+    <div class="card" id="wifiAllCard" hidden>
+      <h2>Wi‑Fi</h2>
+      <div class="table-scroll"><table class="tbl" id="wifiAll"></table></div>
     </div>
     <div class="card" id="stpAllCard" hidden>
       <h2>STP на коммутаторах</h2>
@@ -291,6 +296,48 @@
   </section>
 
   <!-- STP -->
+  <!-- WI-FI (контроллер) -->
+  <section class="tab" id="tab-wifi" hidden>
+    <div class="stats" id="wifiStats"></div>
+    <div class="card" id="wifiProblemsCard" hidden>
+      <h2>Проблемы Wi‑Fi</h2>
+      <div id="wifiProblems"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Точки доступа</h2>
+        <div class="controls">
+          <select id="apFilter">
+            <option value="">Все точки</option>
+            <option value="bad">Не работают</option>
+            <option value="ok">Работают</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint">«Где подключена» — порт коммутатора, на котором виден MAC точки (по таблицам MAC всех коммутаторов из списка).</p>
+      <div class="table-scroll"><table class="tbl" id="wifiAps"></table></div>
+    </div>
+    <div class="card">
+      <h2>Сети (SSID)</h2>
+      <div class="table-scroll"><table class="tbl static" id="wifiSsids"></table></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Клиенты <span class="muted" id="wifiClientsN"></span></h2>
+        <div class="controls">
+          <input type="search" id="staSearch" placeholder="Имя, MAC, IP, точка, SSID…">
+          <select id="staFilter">
+            <option value="">Все клиенты</option>
+            <option value="weak">Слабый сигнал (ниже −75 дБм)</option>
+            <option value="unknown">Нет в DHCP / AD / DNS</option>
+          </select>
+        </div>
+      </div>
+      <div class="table-scroll"><table class="tbl" id="wifiClients"></table></div>
+    </div>
+    <p class="hint" id="wifiNote"></p>
+  </section>
+
   <section class="tab" id="tab-stp" hidden>
     <div class="grid2">
       <div class="card"><h2>Spanning Tree</h2><div id="stpSummary"></div></div>
@@ -376,6 +423,7 @@
             <option value="hardware">Оборудование (питание, вентиляторы, SFP…)</option>
             <option value="stp">STP (корень, корневой порт)</option>
             <option value="log">Журнал коммутатора (новые находки)</option>
+            <option value="wifi">Wi‑Fi (точки доступа)</option>
             <option value="reach">Доступность коммутатора</option>
           </select>
         </div>

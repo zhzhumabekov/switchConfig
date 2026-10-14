@@ -75,7 +75,7 @@ function validate(b, partial) {
     if (!out.user) throw new HttpError(400, 'Укажите логин');
   }
   if (!partial || b.type !== undefined) {
-    out.type = b.type === 'cisco-cme' ? 'cisco-cme' : 'huawei';
+    out.type = ['cisco-cme', 'cisco-ios', 'huawei-ac'].includes(b.type) ? b.type : 'huawei';
   }
   return out;
 }
@@ -242,7 +242,7 @@ async function api(req, res, parts) {
     const v = validate({ name: 'test', host: b.host ?? sw?.host, port: b.port ?? sw?.port, user: b.user ?? sw?.user, type: b.type ?? sw?.type });
     try {
       const password = await collector.passwordFor(sw, b.password);
-      const prompt = await fetchConfig({ host: v.host, port: v.port, user: v.user, testOnly: true, timeout: 25, vendor: v.type === 'cisco-cme' ? 'cisco' : 'huawei' }, password);
+      const prompt = await fetchConfig({ host: v.host, port: v.port, user: v.user, testOnly: true, timeout: 25, vendor: /^cisco/.test(v.type) ? 'cisco' : 'huawei' }, password);
       return send(res, 200, { ok: true, prompt });
     } catch (err) {
       return send(res, 200, { ok: false, error: err.user ? err.message : humanError(err) });

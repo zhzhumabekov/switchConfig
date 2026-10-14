@@ -1,18 +1,27 @@
-// Журнал коммутатора Huawei VRP (display logbuffer): разбор записей, рекомендации, аудит.
+// Журнал коммутатора Huawei VRP (display logbuffer) и Cisco IOS (show logging): разбор записей, рекомендации, аудит.
 // Только чтение. Результат кладётся в состояние коммутатора (state.log).
 const COMMANDS = { logbuffer: 'display logbuffer' };
 
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 const LEVELS = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'info', 'debug'];
 const times = n => { const m10 = n % 10, m100 = n % 100; return `${n} ${m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? 'раза' : 'раз'}`; };
-const short = n => String(n || '').replace(/^XGigabitEthernet/, 'XGE').replace(/^GigabitEthernet/, 'GE');
-const normPortName = n => String(n || '').replace(/^XGE(?=\d)/i, 'XGigabitEthernet').replace(/^GE(?=\d)/i, 'GigabitEthernet');
-const PORT_RE = /\b((?:X?GigabitEthernet|Eth-Trunk|XGE|GE)\d+(?:\/\d+){0,2})\b/;
+const short = n => String(n || '').replace(/^XGigabitEthernet/, 'XGE').replace(/^GigabitEthernet/, 'GE').replace(/^TenGigabitEthernet/, 'Te').replace(/^FastEthernet/, 'Fa');
+const normPortName = n => String(n || '').replace(/^XGE(?=\d)/i, 'XGigabitEthernet').replace(/^GE(?=\d)/i, 'GigabitEthernet')
+  .replace(/^Gi(?=\d)/, 'GigabitEthernet').replace(/^Te(?=\d)/, 'TenGigabitEthernet').replace(/^Fa(?=\d)/, 'FastEthernet').replace(/^Po(?=\d)/, 'Port-channel');
+const PORT_RE = /\b((?:X?GigabitEthernet|TenGigabitEthernet|FastEthernet|Port-channel|Eth-Trunk|XGE|GE|Gi|Te|Fa|Po)\d+(?:\/\d+){0,2})\b/;
 
 /* ---------- разбор ----------
 Oct  1 2026 10:21:03+06:00 SW %%01IFNET/4/IF_STATE(l)[12]:Interface GigabitEthernet0/0/4 has turned into DOWN state.
 */
 const LINE_RE = /^(\w{3})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\S*\s+(\S+)\s+%%(\d{2})([\w-]+)\/(\d)\/([\w-]+)(?:\([a-z]+\))?(?:\[\d+\])?\s*:\s*(.*)$/i;
+
+/* Cisco IOS:
+000123: *Oct 14 10:21:03.123 ALMT: %LINK-3-UPDOWN: Interface GigabitEthernet1/0/5, changed state to down
+Oct 14 2026 10:21:03: %SW_MATM-4-MACFLAP_NOTIF: Host 0011.2233.4455 in vlan 20 is flapping between port Gi1/0/5 and port Gi1/0/48
+*/
+const CISCO_RE = /^(?:\d+:\s*)?[*.]?(\w{3})\s+(\d{1,2})\s+(?:(\d{4})\s+)?(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:\s+[A-Za-z]{2,6})?\s*:\s*%([A-Z0-9_]+)-(\d)-([A-Z0-9_]+)\s*:\s*(.*)$/;
+// Без даты (service timestamps uptime): «1w2d: %LINK-3-UPDOWN: …»
+const CISCO_UP_RE = /^(?:\d+:\s*)?(\S+)\s*:\s*%([A-Z0-9_]+)-(\d)-([A-Z0-9_]+)\s*:\s*(.*)$/;
 
 function parseBuffer(text) {
   const t = String(text || '').replace(/\r/g, '');
@@ -23,11 +32,31 @@ function parseBuffer(text) {
     overwritten: +((t.match(/Overwritten messages\s*:\s*(\d+)/i) || [])[1] || 0),
     current: +((t.match(/Current messages\s*:\s*(\d+)/i) || [])[1] || 0),
   };
+  const cisco = /Logging Buffer|Syslog logging:|%[A-Z0-9_]+-\d-[A-Z0-9_]+:/.test(t) && !/%%\d{2}/.test(t);
+  if (cisco) {
+    meta.enabled = !/Buffer logging:\s*disabled/i.test(t);
+    meta.maxSize = +((t.match(/Log Buffer \((\d+) bytes\)/i) || [])[1] || 0);
+    meta.current = +((t.match(/Buffer logging:.*?(\d+) messages logged/i) || [])[1] || 0);
+    meta.vendor = 'cisco';
+  }
   const entries = [];
+  const now = Date.now();
+  let seq = 0;
   for (const raw of t.split('\n')) {
     const l = raw.replace(/\s+$/, '');
-    const m = l.match(LINE_RE);
-    if (m) {
+    const m = !cisco && l.match(LINE_RE);
+    const c = cisco && l.match(CISCO_RE);
+    const u = cisco && !c && l.match(CISCO_UP_RE);
+    if (c) {
+      const mon = MONTHS[c[1].toLowerCase()];
+      let year = c[3] ? +c[3] : new Date().getFullYear();
+      let d = new Date(year, mon == null ? 0 : mon, +c[2], +c[4], +c[5], +c[6]);
+      if (!c[3] && d.getTime() > now + 86400e3) { year--; d = new Date(year, mon == null ? 0 : mon, +c[2], +c[4], +c[5], +c[6]); }
+      entries.push({ ts: d.getTime(), time: `${year}-${String((mon ?? 0) + 1).padStart(2, '0')}-${String(c[2]).padStart(2, '0')} ${c[4]}:${c[5]}:${c[6]}`,
+        host: '', module: c[7], level: +c[8], brief: c[9], text: c[10].trim() });
+    } else if (u) {
+      entries.push({ ts: ++seq, time: u[1], host: '', module: u[2], level: +u[3], brief: u[4], text: u[5].trim() });
+    } else if (m) {
       const mon = MONTHS[m[1].toLowerCase()];
       const d = new Date(+m[3], mon == null ? 0 : mon, +m[2], +m[4], +m[5], +m[6]);
       entries.push({ ts: d.getTime(), time: `${m[3]}-${String((mon ?? 0) + 1).padStart(2, '0')}-${String(m[2]).padStart(2, '0')} ${m[4]}:${m[5]}:${m[6]}`,
@@ -53,8 +82,8 @@ const maxPps = items => Math.max(0, ...items.map(e => +(e.text.match(/AttackPack
 const RULES = [
   {
     id: 'flap', cat: 'Порты',
-    test: e => /IF_STATE|PHY_STATUS|LINK_STATE|IFNET/i.test(e.module + e.brief) && /(DOWN|UP)\b/i.test(e.text) && PORT_RE.test(e.text) && !/Vlanif|LoopBack|NULL/i.test(e.text),
-    key: e => (e.text.match(PORT_RE) || [])[1],
+    test: e => /IF_STATE|PHY_STATUS|LINK_STATE|IFNET|^LINKUPDOWN$/i.test(e.module + e.brief) && /(DOWN|UP)\b/i.test(e.text) && PORT_RE.test(e.text) && !/Vlanif|LoopBack|NULL/i.test(e.text),
+    key: e => normPortName((e.text.match(PORT_RE) || [])[1]),
     build: g => {
       const downs = g.items.filter(e => /DOWN/i.test(e.text)).length;
       if (downs < 3) return null;
@@ -83,7 +112,7 @@ const RULES = [
   {
     id: 'macflap', cat: 'Петли',
     test: e => /MFLP|MAC_?FLAP|MACFLAP/i.test(e.module + e.brief) || /mac[- ]?address(es)? (flapping|flap)|flapping/i.test(e.text) && /mac/i.test(e.text),
-    key: e => field(e.text, 'MacAddress') || field(e.text, 'MAC') || 'общее',
+    key: e => field(e.text, 'MacAddress') || field(e.text, 'MAC') || ((e.text.match(/^Host ([0-9a-f.]+)/i) || [])[1] || '').replace(/\./g, '').replace(/^(.{4})(.{4})(.{4})$/, '$1-$2-$3') || 'общее',
     build: g => ({
       sev: 'high', title: `MAC-адрес «прыгает» между портами${g.key !== 'общее' ? `: ${g.key}` : ''} (${times(g.count)})`,
       detail: `Последний раз — ${g.last}. ${g.items[g.items.length - 1].text.slice(0, 200)}`,
@@ -93,8 +122,8 @@ const RULES = [
   },
   {
     id: 'bpdu', cat: 'STP',
-    test: e => /BPDU.?PROTECT/i.test(e.brief + e.text),
-    key: e => (e.text.match(PORT_RE) || [])[1] || 'общее',
+    test: e => /BPDU.?PROTECT|BPDUGUARD/i.test(e.brief + e.text),
+    key: e => normPortName((e.text.match(PORT_RE) || [])[1]) || 'общее',
     build: g => ({
       sev: 'high', title: `BPDU-protection отключила порт ${short(g.key)} (${times(g.count)})`,
       detail: `Последний раз — ${g.last}.`,
@@ -105,7 +134,7 @@ const RULES = [
   },
   {
     id: 'stp-tc', cat: 'STP',
-    test: e => /MSTP|STP/i.test(e.module) && /TC|TOPOLOGY|ROOT/i.test(e.brief + e.text),
+    test: e => /MSTP|STP|SPANTREE/i.test(e.module) && /TC|TOPOLOGY|ROOT/i.test(e.brief + e.text) && !/BPDUGUARD/i.test(e.brief),
     key: e => /ROOT/i.test(e.brief) || /root bridge/i.test(e.text) ? 'root' : 'tc',
     build: g => {
       if (g.key === 'root') return { sev: 'high', title: `Сменялся корневой мост STP (${times(g.count)})`, detail: `Последний раз — ${g.last}.`,
@@ -146,7 +175,7 @@ const RULES = [
   },
   {
     id: 'dupip', cat: 'Сеть',
-    test: e => /DUPLICATE|IPCONFLICT|IP_?CONFLICT|ARP_?DUP/i.test(e.brief) || /duplicate ip|ip address conflict|conflict.*ip/i.test(e.text),
+    test: e => /DUPLICATE|IPCONFLICT|IP_?CONFLICT|ARP_?DUP|DUPADDR/i.test(e.brief) || /duplicate ip|ip address conflict|conflict.*ip/i.test(e.text),
     key: e => field(e.text, 'IpAddress') || field(e.text, 'Ip') || (e.text.match(/(\d+\.\d+\.\d+\.\d+)/) || [])[1] || 'неизвестно',
     build: g => {
       const macs = [...new Set(g.items.map(e => field(e.text, 'MacAddress') || field(e.text, 'Mac')).filter(Boolean))];
@@ -159,7 +188,7 @@ const RULES = [
   },
   {
     id: 'hw', cat: 'Оборудование',
-    test: e => /DEVM|ENTITY|ENTITYTRAP|POWER|FAN|TEMPERATURE/i.test(e.module) || /hwPower|hwFan|hwTemperature|hwEntity|power supply|fan (fault|failure|abnormal)|temperature (rise|exceed)/i.test(e.brief + e.text),
+    test: e => /DEVM|ENTITY|ENTITYTRAP|POWER|FAN|TEMPERATURE|ENVMON|PLATFORM_ENV|PSU/i.test(e.module) || /hwPower|hwFan|hwTemperature|hwEntity|power supply|fan (fault|failure|abnormal)|temperature (rise|exceed)/i.test(e.brief + e.text),
     key: e => /power/i.test(e.brief + e.text) ? 'питание' : /fan/i.test(e.brief + e.text) ? 'вентилятор' : /temperat/i.test(e.brief + e.text) ? 'температура' : 'устройство',
     build: g => {
       const bad = g.items.filter(e => e.level <= 4);
@@ -280,7 +309,15 @@ const RULES = [
 function audit(entries) {
   const commands = [], logins = [];
   for (const e of entries) {
-    if (/CMDRECORD/i.test(e.brief)) {
+    if (/^CONFIG_I$/.test(e.brief)) {
+      const m = e.text.match(/Configured from (\S+) by (\S+)(?: on (\S+))?(?: \((\d+\.\d+\.\d+\.\d+)\))?/i) || [];
+      commands.push({ time: e.time, ts: e.ts, user: m[2] || '', ip: m[4] || '', command: `(изменена конфигурация, ${m[3] || m[1] || '?'})` });
+    } else if (/CFGLOG_LOGGEDCMD/.test(e.brief)) {
+      const m = e.text.match(/User:\s*(\S+)\s+logged command:\s*(.*)$/i) || [];
+      if (m[2] && !/^!exec:|^show /i.test(m[2])) commands.push({ time: e.time, ts: e.ts, user: m[1] || '', ip: '', command: m[2] });
+    } else if (/^LOGIN_SUCCESS$|^LOGOUT$/.test(e.brief)) {
+      logins.push({ time: e.time, ts: e.ts, kind: /OUT/.test(e.brief) ? 'выход' : 'вход', user: (e.text.match(/\[user:\s*([^\]]+)\]/i) || e.text.match(/User (\S+)/) || [])[1] || '', ip: (e.text.match(/(\d+\.\d+\.\d+\.\d+)/) || [])[1] || '', text: e.text.slice(0, 160) });
+    } else if (/CMDRECORD/i.test(e.brief)) {
       const cmd = (e.text.match(/Command="([^"]*)"/i) || [])[1] || field(e.text, 'Command');
       if (!cmd || /^(display|dis |screen-length|quit|return|system-view|sys$|ping|tracert|undo terminal|terminal)/i.test(cmd.trim())) continue;
       commands.push({ time: e.time, ts: e.ts, user: field(e.text, 'User'), ip: field(e.text, 'Ip'), command: cmd });
@@ -293,6 +330,7 @@ function audit(entries) {
 
 function analyze(text) {
   const { meta, entries } = parseBuffer(text);
+  const cisco = meta.vendor === 'cisco';
   const findings = [];
   const unmatched = new Map();
   const groups = new Map(); // ruleId|key → группа
@@ -310,6 +348,7 @@ function analyze(text) {
   for (const [gk, g] of groups) {
     const grp = { key: g.key, items: g.items, count: g.items.length, first: g.items[0].time, last: g.items[g.items.length - 1].time };
     const f = g.rule.build(grp);
+    if (f && cisco) { delete f.commands; delete f.warn; }
     if (f) findings.push({ id: gk, rule: g.rule.id, cat: g.rule.cat, count: grp.count, first: grp.first, last: grp.last, lastTs: g.items[g.items.length - 1].ts, ...f });
   }
   const order = { high: 0, med: 1, info: 2 };

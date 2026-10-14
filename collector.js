@@ -5,6 +5,8 @@ const live = require('./live-state');
 const history = require('./history');
 const directory = require('./directory');
 const cme = require('./cme');
+const wlan = require('./wlan');
+const ciscoState = require('./cisco-state');
 const { runCommands, extract, humanError } = require('./fetch-config');
 
 const busy = new Set(); // id коммутаторов, с которых сейчас забираются данные
@@ -54,6 +56,24 @@ async function collectCme(sw) {
   return { ok: true, phones: state.phones.length, registered: state.phones.filter(p => p.status === 'registered').length, stateErrors: state.errors };
 }
 
+const upText = sec => { const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60); return d ? `${d} дн ${h} ч` : h ? `${h} ч ${m} мин` : `${m} мин`; };
+
+// Контроллер Wi‑Fi: точка доступа пропала или вернулась
+function apEvents(sw, prev, cur) {
+  if (!prev || !prev.wlan || !cur.wlan) return;
+  const before = new Map(prev.wlan.aps.map(a => [a.mac, a]));
+  const ok = a => a.state === 'nor' || a.state === 'normal';
+  for (const a of cur.wlan.aps) {
+    const b = before.get(a.mac);
+    if (!b) { history.addEvent({ sw: sw.id, swName: sw.name, type: 'ap-new', sev: 'info', mac: a.mac, text: `Новая точка доступа ${a.name} (${a.mac}${a.ip ? ', ' + a.ip : ''})` }); continue; }
+    if (ok(b) && !ok(a)) history.addEvent({ sw: sw.id, swName: sw.name, type: 'ap-down', sev: 'high', mac: a.mac, text: `Точка доступа ${a.name}: ${a.stateText}` });
+    if (!ok(b) && ok(a)) history.addEvent({ sw: sw.id, swName: sw.name, type: 'ap-up', sev: 'info', mac: a.mac, text: `Точка доступа ${a.name} снова работает` });
+    else if (ok(b) && ok(a) && a.uptimeSec != null && b.uptimeSec != null && a.uptimeSec < b.uptimeSec) history.addEvent({ sw: sw.id, swName: sw.name, type: 'ap-reboot', sev: 'med', mac: a.mac, text: `Точка доступа ${a.name} перезагрузилась (работает ${upText(a.uptimeSec)})` });
+  }
+  const now = new Set(cur.wlan.aps.map(a => a.mac));
+  for (const b of prev.wlan.aps) if (!now.has(b.mac)) history.addEvent({ sw: sw.id, swName: sw.name, type: 'ap-gone', sev: 'med', mac: b.mac, text: `Точка доступа ${b.name} исчезла из списка контроллера` });
+}
+
 // opts.config — забирать ли конфигурацию (иначе только состояние портов)
 async function collect(id, { config = true, reason = 'manual' } = {}) {
   if (busy.has(id)) throw new UserError(409, 'Данные с этого коммутатора уже забираются');
@@ -80,15 +100,20 @@ async function collect(id, { config = true, reason = 'manual' } = {}) {
   const attemptAt = new Date().toISOString();
   try {
     const password = await passwordFor(sw);
-    const stateKeys = Object.keys(live.COMMANDS);
-    const commands = [...(config ? ['display current-configuration'] : []), ...stateKeys.map(k => live.COMMANDS[k])];
-    const outputs = await runCommands({ host: sw.host, port: sw.port, user: sw.user }, password, commands);
+    // Набор команд зависит от типа устройства
+    const isCisco = sw.type === 'cisco-ios', isAc = sw.type === 'huawei-ac';
+    const STATE_CMDS = isCisco ? ciscoState.COMMANDS : isAc ? { ...live.COMMANDS, ...wlan.COMMANDS } : live.COMMANDS;
+    const stateKeys = Object.keys(STATE_CMDS);
+    const configCmd = isCisco ? 'show running-config' : 'display current-configuration';
+    const commands = [...(config ? [configCmd] : []), ...stateKeys.map(k => STATE_CMDS[k])];
+    const enablePassword = isCisco && sw.enableSecret ? await store.decrypt(sw.enableSecret) : null;
+    const outputs = await runCommands({ host: sw.host, port: sw.port, user: sw.user, vendor: isCisco ? 'cisco' : 'huawei', enablePassword, timeout: isAc || isCisco ? 120 : 60 }, password, commands);
 
     let text = store.readConfig(id);
     let changed = false, diff = null;
     if (config) {
-      text = extract(outputs.shift());
-      if (!/^sysname /m.test(text)) throw new Error('Получен неполный вывод — конфигурация не сохранена');
+      text = isCisco ? ciscoState.extractConfig(outputs.shift()) : extract(outputs.shift());
+      if (!(isCisco ? /^hostname /m : /^sysname /m).test(text)) throw new Error('Получен неполный вывод — конфигурация не сохранена');
       // Первая версия истории — из того, что уже было сохранено раньше
       history.seedConfig(id, store.readConfig(id), sw.lastFetch);
       changed = store.writeConfig(id, text);
@@ -99,8 +124,14 @@ async function collect(id, { config = true, reason = 'manual' } = {}) {
     }
 
     const raw = Object.fromEntries(stateKeys.map((k, i) => [k, outputs[i]]));
-    const state = live.parseAll(raw);
+    const state = isCisco ? ciscoState.parseAll(raw) : live.parseAll(raw);
+    if (isCisco) state.vendor = 'cisco';
+    if (isAc) {
+      state.wlan = wlan.parseAll(raw);
+      Object.assign(state.errors, state.wlan.errors);
+    }
     const prevState = store.readState(id);
+    if (isAc) apEvents(sw, prevState, state);
     store.writeState(id, state, raw);
     history.onState(sw, prevState, state, text, directory.readResult());
 
@@ -109,7 +140,7 @@ async function collect(id, { config = true, reason = 'manual' } = {}) {
       const now = new Date().toISOString();
       if (config) {
         cur.lastFetch = now;
-        cur.sysname = (text.match(/^sysname\s+(\S+)/m) || [])[1] || cur.sysname;
+        cur.sysname = (text.match(/^(?:sysname|hostname)\s+(\S+)/m) || [])[1] || cur.sysname;
         if (changed) cur.lastChange = now;
       }
       cur.stateAt = state.at;

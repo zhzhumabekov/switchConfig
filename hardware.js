@@ -120,9 +120,12 @@ function parseFan(text) {
   for (const l of lines(text)) {
     const t = l.trim().split(/\s+/);
     if (!/^\d+$/.test(t[0] || '')) continue;
-    const si = t.findIndex((x, i) => i > 0 && /^(Normal|Abnormal|Fault|Absent|Present|Failed|Block)$/i.test(x));
+    // Столбец «Online» (Present/Absent) — не состояние; состояние — Normal/Abnormal/…
+    let si = t.findIndex((x, i) => i > 0 && /^(Normal|Abnormal|Fault|Failed|Block)$/i.test(x));
+    if (si < 0) si = t.findIndex((x, i) => i > 0 && /^Absent$/i.test(x));
     if (si < 0) continue;
-    out.push({ slot: +t[0], id: t[1], status: t[si], speed: num(t[si + 1]) });
+    const online = t.find((x, i) => i > 0 && /^(Present|Absent)$/i.test(x)) || '';
+    out.push({ slot: +t[0], id: t[1], online, status: t[si], speed: num(t[si + 1]) });
   }
   return out;
 }

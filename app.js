@@ -24,14 +24,15 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 /* =====================================================================
    Парсер конфигурации Huawei VRP
    ===================================================================== */
-function parseTree(text) {
-  // Возвращает список секций (разделённых '#'), каждая — массив узлов {cmd, children, lines}
+function parseTree(text, sep = '#') {
+  // Возвращает список секций (разделённых '#', у Cisco — '!'), каждая — массив узлов {cmd, children, lines}
   const sections = [];
   let cur = [];
   const stack = [];
   for (const raw of text.replace(/\r/g, '').split('\n')) {
     const line = raw.replace(/\s+$/, '');
-    if (line.trim() === '#') { if (cur.length) sections.push(cur); cur = []; stack.length = 0; continue; }
+    if (line.trim() === sep || (sep === '!' && /^!/.test(line))) { if (cur.length) sections.push(cur); cur = []; stack.length = 0; continue; }
+    if (sep === '!' && line === 'end') continue;
     if (!line.trim()) continue;
     const depth = line.match(/^ */)[0].length;
     const node = { cmd: line.trim(), depth, children: [] };
@@ -70,7 +71,7 @@ function sameNet(ip, net, mask) { const m = ipToInt(mask); return ((ipToInt(ip) 
 function netOf(ip, mask) { const n = (ipToInt(ip) & ipToInt(mask)) >>> 0; return [n >>> 24, (n >> 16) & 255, (n >> 8) & 255, n & 255].join('.'); }
 
 function shortName(name) {
-  return name.replace(/^XGigabitEthernet/, 'XGE').replace(/^GigabitEthernet/, 'GE').replace(/^MEth/, 'MEth');
+  return name.replace(/^XGigabitEthernet/, 'XGE').replace(/^TenGigabitEthernet/, 'Te').replace(/^TwoGigabitEthernet/, 'Tw').replace(/^GigabitEthernet/, 'GE').replace(/^FastEthernet/, 'Fa').replace(/^MEth/, 'MEth');
 }
 
 function classify(p) {
@@ -225,6 +226,147 @@ function parseAaa(cfg, n) {
 }
 
 /* =====================================================================
+   Парсер конфигурации Cisco IOS (show running-config) — в ту же модель, что и Huawei
+   ===================================================================== */
+// "1,20-21,50" → [{from:1,to:1},{from:20,to:21},{from:50,to:50}]
+function parseCiscoVlans(s) {
+  const out = [];
+  for (const part of String(s || '').split(',')) {
+    const m = part.trim().match(/^(\d+)(?:-(\d+))?$/);
+    if (m) out.push({ from: +m[1], to: +(m[2] || m[1]) });
+  }
+  return out;
+}
+
+function parseConfigCisco(text) {
+  const sections = parseTree(text, '!');
+  const nodes = sections.flat();
+  const cfg = {
+    text, sections, vendor: 'cisco',
+    version: '', sysname: '', vlansDeclared: [], vlanNames: {},
+    ports: [], vlanifs: [], routes: [], others: [],
+    aaa: { schemes: [], domains: [], users: {} },
+    radius: [], ntp: { servers: [], flags: [] }, snmp: { lines: [], communities: 0 },
+    ssh: { users: {}, flags: [] }, ui: [], log: [], misc: {},
+    authProfiles: [], dot1x: [], stpLines: [], vlanDefsInConfig: false, aaaNewModel: false, httpServer: false,
+  };
+  for (const n of nodes) {
+    const c = n.cmd;
+    let m;
+    if ((m = c.match(/^hostname\s+(\S+)/))) cfg.sysname = m[1];
+    else if ((m = c.match(/^version\s+(\S+)/))) cfg.version = 'IOS ' + m[1];
+    else if ((m = c.match(/^vlan\s+([\d,\-]+)$/))) {
+      cfg.vlanDefsInConfig = true;
+      const r = parseCiscoVlans(m[1]);
+      const nm = n.children.find(x => /^name\s/.test(x.cmd));
+      for (const x of r) {
+        if (nm && x.from === x.to) cfg.vlanNames[x.from] = nm.cmd.slice(5);
+        if (!inRanges(cfg.vlansDeclared, x.from)) cfg.vlansDeclared.push(x);
+      }
+    }
+    else if ((m = c.match(/^interface\s+(\S+)/))) parseInterfaceCisco(cfg, m[1], n);
+    else if ((m = c.match(/^ip route\s+(?:vrf\s+\S+\s+)?(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)(.*)/))) cfg.routes.push({ net: m[1], mask: m[2], nh: m[3], extra: m[4].trim() });
+    else if ((m = c.match(/^ip default-gateway\s+(\S+)/))) cfg.routes.push({ net: '0.0.0.0', mask: '0.0.0.0', nh: m[1], extra: '(ip default-gateway)' });
+    else if (c === 'aaa new-model') { cfg.aaaNewModel = true; cfg.others.push(c); }
+    else if ((m = c.match(/^aaa (authentication|authorization|accounting)\s+(\S+)\s+(\S+)\s*(.*)$/))) cfg.aaa.schemes.push({ kind: m[1], name: `${m[2]} ${m[3]}`, opts: [m[4]].filter(Boolean) });
+    else if ((m = c.match(/^radius server\s+(\S+)/))) {
+      const t = { name: m[1], servers: [], opts: [] };
+      for (const ch of n.children) {
+        const a = ch.cmd.match(/^address ipv4\s+(\S+)(?:.*auth-port\s+(\d+))?/);
+        if (a) t.servers.push({ kind: 'authentication', ip: a[1], port: a[2] || '1812', weight: '' });
+        else if (/^key\b/.test(ch.cmd)) t.opts.push('key задан (скрыт)');
+        else t.opts.push(ch.cmd);
+      }
+      cfg.radius.push(t);
+    }
+    else if ((m = c.match(/^radius-server host\s+(\S+)/))) cfg.radius.push({ name: m[1], servers: [{ kind: 'authentication', ip: m[1], port: (c.match(/auth-port\s+(\d+)/) || [])[1] || '1812', weight: '' }], opts: /key/.test(c) ? ['key задан (скрыт)'] : [] });
+    else if ((m = c.match(/^ntp server\s+(?:vrf\s+\S+\s+)?(\S+)/))) cfg.ntp.servers.push(m[1]);
+    else if (/^ntp\s/.test(c)) cfg.ntp.flags.push(c.replace(/^ntp\s+/, '').replace(/(authentication-key \d+ md5) \S+/, '$1 *****'));
+    else if (/^snmp-server/.test(c)) {
+      if (/^snmp-server community/.test(c)) cfg.snmp.communities++;
+      cfg.snmp.lines.push(c.replace(/^(snmp-server community)\s+\S+/, '$1 *****'));
+    }
+    else if ((m = c.match(/^username\s+(\S+)(.*)$/))) {
+      const lv = m[2].match(/privilege\s+(\d+)/);
+      cfg.aaa.users[m[1]] = { name: m[1], level: lv ? +lv[1] : 1, services: [], password: /\b(secret|password)\b/.test(m[2]), plain: /\bpassword 0\b|\bpassword (?!\d)/.test(m[2]) };
+    }
+    else if (/^ip ssh\b/.test(c)) cfg.ssh.flags.push(c);
+    else if (/^ip http (secure-)?server$/.test(c)) { cfg.ssh.flags.push(c); if (c === 'ip http server') cfg.httpServer = true; }
+    else if ((m = c.match(/^line\s+(.+)/))) cfg.ui.push({ name: m[1], opts: n.children.map(x => x.cmd.replace(/^(password|secret)(\s+\d)?\s+\S+$/, '$1 *****')) });
+    else if (/^logging\b/.test(c)) cfg.log.push(c);
+    else if ((m = c.match(/^clock timezone\s+(\S+)\s+(-?\d+)(?:\s+(\d+))?/))) cfg.misc.tz = `${m[1]} (UTC${+m[2] >= 0 ? '+' : '−'}${Math.abs(+m[2])}${m[3] && +m[3] ? ':' + m[3] : ''})`;
+    else if (c === 'lldp run') cfg.misc.lldp = true;
+    else if (c === 'no cdp run') cfg.misc.noCdp = true;
+    else if (/^(no )?spanning-tree\b/.test(c)) cfg.stpLines.push(nodeText(n));
+    else cfg.others.push(nodeText(n));
+  }
+  // На коммутаторе с портами FastEthernet гигабитные порты — это аплинки: рисуем их отдельным блоком
+  if (cfg.ports.some(p => p.fe)) for (const p of cfg.ports) if (!p.fe && p.type === 'ge') p.type = 'xge';
+  for (const p of cfg.ports) p.role = classify(p);
+  return cfg;
+}
+
+function parseInterfaceCisco(cfg, name, n) {
+  const lines = n.children.map(x => x.cmd);
+  let m;
+  if ((m = name.match(/^Vlan(\d+)$/i))) {
+    const ip = lines.map(l => l.match(/^ip address\s+(\d\S+)\s+(\S+)(\s+secondary)?/)).filter(Boolean);
+    cfg.vlanifs.push({ name, vlan: +m[1], lines, ips: ip.map(x => ({ ip: x[1], mask: x[2], sub: !!x[3] })), shutdown: lines.includes('shutdown') });
+    return;
+  }
+  m = name.match(/^(TenGigabitEthernet|TwentyFiveGigE|FortyGigabitEthernet|HundredGigE|TwoGigabitEthernet|GigabitEthernet|FastEthernet)(\d+(?:\/\d+)+)$/);
+  if (!m) { cfg.others.push(nodeText(n)); return; }
+  const nums = m[2].split('/').map(Number);
+  const [slot, sub, idx] = nums.length >= 3 ? nums.slice(-3) : [nums[0], 0, nums[1]];
+  const p = {
+    name, short: shortName(name), type: /^(Ten|TwentyFive|Forty|Hundred)/.test(m[1]) ? 'xge' : 'ge', fe: m[1] === 'FastEthernet',
+    slot, sub, idx, lines,
+    desc: '', portDesc: '', linkType: '', pvid: null, allowed: [], untagged: [],
+    lbd: false, voiceVlan: null, lldpOff: false, negOff: false, stpEdgeOff: false, shutdown: false,
+    stpLines: [], edged: null, stpOff: false, rootProt: false, loopProt: false, bpduFilter: false, bpduGuard: null, channel: null,
+  };
+  let access = null, native = null, trunkAllowed = null;
+  for (const l of lines) {
+    let r;
+    if ((r = l.match(/^description\s+(.+)/))) p.desc = r[1];
+    else if ((r = l.match(/^switchport mode\s+(access|trunk)/))) p.linkType = r[1];
+    else if ((r = l.match(/^switchport access vlan\s+(\d+)/))) access = +r[1];
+    else if ((r = l.match(/^switchport trunk native vlan\s+(\d+)/))) native = +r[1];
+    else if ((r = l.match(/^switchport trunk allowed vlan\s+(add\s+|remove\s+|except\s+)?(.+)/))) {
+      if (r[2] === 'none') trunkAllowed = [];
+      else if (r[2] === 'all') trunkAllowed = [{ from: 1, to: 4094 }];
+      else if (!r[1] || /add/.test(r[1])) trunkAllowed = [...(trunkAllowed || []), ...parseCiscoVlans(r[2])];
+    }
+    else if ((r = l.match(/^switchport voice vlan\s+(\d+)/))) p.voiceVlan = +r[1];
+    else if (/^no (lldp transmit|lldp receive)$/.test(l)) p.lldpOff = true;
+    else if (/^(speed (10|100|1000)|duplex (full|half))$/.test(l)) p.negOff = true;
+    else if ((r = l.match(/^channel-group\s+(\d+)/))) p.channel = +r[1];
+    else if (l === 'shutdown') p.shutdown = true;
+    if (/^(no )?spanning-tree\b/.test(l)) {
+      p.stpLines.push(l);
+      if (/^spanning-tree portfast( edge)?( trunk)?$/.test(l)) p.edged = true;
+      if (/^spanning-tree portfast disable$/.test(l)) { p.edged = false; p.stpEdgeOff = true; }
+      if (l === 'spanning-tree bpduguard enable') p.bpduGuard = true;
+      if (l === 'spanning-tree bpduguard disable') p.bpduGuard = false;
+      if (l === 'spanning-tree guard root') p.rootProt = true;
+      if (l === 'spanning-tree guard loop') p.loopProt = true;
+      if (l === 'spanning-tree bpdufilter enable') p.bpduFilter = true;
+    }
+  }
+  if (p.linkType === 'trunk') {
+    p.pvid = native;
+    p.allowed = trunkAllowed || [{ from: 1, to: 4094 }];
+    p.effPvid = native ?? 1;
+  } else {
+    if (!p.linkType && access != null) p.linkType = 'access';
+    p.pvid = access;
+    p.effPvid = access ?? (lines.length ? 1 : null);
+    if (p.effPvid != null) p.allowed = [{ from: p.effPvid, to: p.effPvid }];
+  }
+  cfg.ports.push(p);
+}
+
+/* =====================================================================
    Утилиты представления
    ===================================================================== */
 function portSort(a, b) {
@@ -282,9 +424,13 @@ function analyze(cfg) {
   const issues = [];
   const active = cfg.ports.filter(p => p.lines.length);
 
+  const cisco = cfg.vendor === 'cisco';
+  // У Cisco в режиме VTP server/client VLAN не попадают в конфигурацию — проверку «VLAN не создан» не делаем
+  const vlanCheck = !cisco || cfg.vlanDefsInConfig;
+
   // 1. VLAN используются на портах, но не созданы
   const undeclared = new Map();
-  for (const p of active) {
+  for (const p of vlanCheck ? active : []) {
     const ranges = [...p.allowed, ...p.untagged];
     if (p.pvid != null) ranges.push({ from: p.pvid, to: p.pvid });
     for (const r of ranges) {
@@ -308,7 +454,7 @@ function analyze(cfg) {
 
   // 2. Vlanif без VLAN
   for (const vi of cfg.vlanifs) {
-    if (vi.vlan !== 1 && !inRanges(cfg.vlansDeclared, vi.vlan) && !vi.shutdown) {
+    if (vlanCheck && vi.vlan !== 1 && !inRanges(cfg.vlansDeclared, vi.vlan) && !vi.shutdown) {
       issues.push({ kind: 'vlanif-novlan', data: { name: vi.name, vlan: vi.vlan, ips: vi.ips.map(i => i.ip) }, sev: 'high', title: `${vi.name} настроен, но VLAN ${vi.vlan} не создан`, body: `Интерфейс ${vi.ips.map(i => i.ip).join(', ')} не поднимется (down), пока нет VLAN ${vi.vlan} и порта, где он проходит.` });
     }
   }
@@ -329,7 +475,7 @@ function analyze(cfg) {
 
   // 5. Порт конечного устройства без PVID
   const noPvid = active.filter(p => p.linkType === 'trunk' && p.pvid == null && ['printer', 'test', 'access'].includes(p.role));
-  if (noPvid.length) issues.push({ kind: 'no-pvid', sev: 'med', title: 'Порты для устройств без PVID', body: 'Для транка без «port trunk pvid» PVID = 1. Нетегированный трафик принтера или ПК попадёт в VLAN 1, а не в нужный VLAN. Задайте pvid или переведите порт в режим access.', ports: noPvid });
+  if (noPvid.length) issues.push({ kind: 'no-pvid', sev: 'med', title: 'Порты для устройств без PVID', body: cisco ? 'Для транка без «switchport trunk native vlan» native VLAN = 1. Нетегированный трафик принтера или ПК попадёт в VLAN 1, а не в нужный VLAN. Задайте native vlan или переведите порт в режим access.' : 'Для транка без «port trunk pvid» PVID = 1. Нетегированный трафик принтера или ПК попадёт в VLAN 1, а не в нужный VLAN. Задайте pvid или переведите порт в режим access.', ports: noPvid });
 
   // 6. Шаблон «port description desktop» на непользовательских портах
   const wrongDesc = active.filter(p => p.portDesc === 'desktop' && !['access'].includes(p.role));
@@ -341,13 +487,14 @@ function analyze(cfg) {
   if (acc.length && accNoLbd.length && accNoLbd.length < acc.length) issues.push({ kind: 'lbd-missing', sev: 'info', title: `Loopback-detect включён не на всех пользовательских портах (${acc.length - accNoLbd.length} из ${acc.length})`, body: 'На остальных рабочих местах петля (например, кабель, воткнутый в два порта) не будет обнаружена.', ports: accNoLbd, collapse: true });
 
   // 8. Безопасность
-  const con = cfg.ui.find(u => /^con/.test(u.name));
+  if (cisco) ciscoSecurity(cfg, issues);
+  const con = !cisco && cfg.ui.find(u => /^con/.test(u.name));
   if (con && con.opts.includes('authentication-mode none')) issues.push({ kind: 'console-noauth', data: { terminalUsers: Object.values(cfg.aaa.users).filter(u => u.services.includes('terminal')).map(u => u.name) }, sev: 'high', title: 'Консольный порт без аутентификации', body: 'user-interface con 0 → authentication-mode none. Любой человек с физическим доступом получает полный доступ к CLI.' });
-  const vtyNoTo = cfg.ui.filter(u => u.opts.some(o => o === 'idle-timeout 0 0'));
+  const vtyNoTo = cisco ? [] : cfg.ui.filter(u => u.opts.some(o => o === 'idle-timeout 0 0'));
   if (vtyNoTo.length) issues.push({ kind: 'vty-timeout', data: { lines: vtyNoTo.map(u => u.name) }, sev: 'med', title: 'Сессии VTY никогда не закрываются по бездействию', body: `idle-timeout 0 0 на ${vtyNoTo.map(u => u.name).join(', ')}. Забытая сессия остаётся открытой бесконечно.` });
   const telnetUsers = Object.values(cfg.aaa.users).filter(u => u.services.some(s => ['telnet', 'ftp', 'http'].includes(s)));
   if (telnetUsers.length) issues.push({ kind: 'plain-proto', data: { users: telnetUsers.map(u => ({ name: u.name, services: u.services })) }, sev: 'med', title: 'Разрешены незашифрованные протоколы управления', body: telnetUsers.map(u => `${u.name}: ${u.services.filter(s => ['telnet', 'ftp', 'http'].includes(s)).join(', ')}`).join('; ') + '. Логины и пароли передаются открытым текстом. Лучше оставить только ssh.' });
-  if (cfg.snmp.lines.some(l => /sys-info version.*\bv(1|2c)\b/.test(l))) issues.push({ kind: 'snmp-v2', sev: 'med', title: 'SNMP v1/v2c без шифрования', body: `Включены SNMP v1/v2c, v3 отключён. Настроено community: ${cfg.snmp.communities}. Community передаются открытым текстом, стоит ограничить доступ ACL или перейти на v3.` });
+  if (!cisco && cfg.snmp.lines.some(l => /sys-info version.*\bv(1|2c)\b/.test(l))) issues.push({ kind: 'snmp-v2', sev: 'med', title: 'SNMP v1/v2c без шифрования', body: `Включены SNMP v1/v2c, v3 отключён. Настроено community: ${cfg.snmp.communities}. Community передаются открытым текстом, стоит ограничить доступ ACL или перейти на v3.` });
 
   // 9. Созданные, но неиспользуемые VLAN
   const declaredList = [];
@@ -363,10 +510,12 @@ function analyze(cfg) {
     const userPorts = active.filter(p => ['access', 'ap', 'printer', 'test'].includes(p.role) && !p.shutdown && !p.stpOff);
     const noEdge = userPorts.filter(p => !stpEdged(p, sc));
     const edged = active.filter(p => stpEdged(p, sc));
-    if (noEdge.length) issues.push({ kind: 'stp-noedge', data: { noBpdu: !sc.bpduProtection }, sev: 'med', title: `Пользовательские порты не настроены как edged (${noEdge.length})`, body: 'Порт без edged после подключения ждёт ~30 с, прежде чем начать передавать трафик, и каждое включение ПК вызывает изменение топологии STP (сброс таблиц MAC на всех коммутаторах).', ports: noEdge, collapse: true });
+    // Cisco: bpduguard можно включить на каждом порту вместо глобальной команды
+    if (cisco && !sc.bpduProtection && edged.length && edged.every(p => p.bpduGuard)) sc.bpduProtection = true;
+    if (noEdge.length) issues.push({ kind: 'stp-noedge', data: { noBpdu: !sc.bpduProtection }, sev: 'med', title: cisco ? `Пользовательские порты без spanning-tree portfast (${noEdge.length})` : `Пользовательские порты не настроены как edged (${noEdge.length})`, body: 'Порт без edged после подключения ждёт ~30 с, прежде чем начать передавать трафик, и каждое включение ПК вызывает изменение топологии STP (сброс таблиц MAC на всех коммутаторах).', ports: noEdge, collapse: true });
     if (!sc.bpduProtection && (edged.length || noEdge.length)) {
       const uplinkEdged = edged.filter(p => ['uplink', 'link'].includes(p.role)).map(p => p.short);
-      issues.push({ kind: 'stp-nobpdu', data: { uplinkEdged }, sev: 'med', title: 'Нет защиты от чужих коммутаторов (bpdu-protection)', body: 'Если к пользовательскому порту подключат коммутатор, он может стать корнем STP или вызвать перестроение всей сети. stp bpdu-protection отключает edged-порт, на который пришёл BPDU.' });
+      issues.push({ kind: 'stp-nobpdu', data: { uplinkEdged }, sev: 'med', title: cisco ? 'Нет защиты от чужих коммутаторов (BPDU Guard)' : 'Нет защиты от чужих коммутаторов (bpdu-protection)', body: cisco ? 'Если к пользовательскому порту подключат коммутатор, он может стать корнем STP или вызвать перестроение всей сети. «spanning-tree portfast bpduguard default» переводит portfast-порт в err-disabled, если на него пришёл BPDU.' : 'Если к пользовательскому порту подключат коммутатор, он может стать корнем STP или вызвать перестроение всей сети. stp bpdu-protection отключает edged-порт, на который пришёл BPDU.' });
     }
     const offUp = active.filter(p => p.stpOff && ['uplink', 'link', 'trunk'].includes(p.role));
     if (offUp.length) issues.push({ kind: 'stp-port-off', sev: 'high', title: 'STP выключен на магистральных портах', body: 'На этих портах петля не будет обнаружена.', ports: offUp });
@@ -376,10 +525,39 @@ function analyze(cfg) {
   return issues.sort((a, b) => order[a.sev] - order[b.sev]);
 }
 
+/* ---------- Cisco: безопасность доступа ---------- */
+function ciscoSecurity(cfg, issues) {
+  const con = cfg.ui.find(u => /^con/.test(u.name));
+  if (con && !cfg.aaaNewModel && !con.opts.some(o => /^login\b/.test(o))) issues.push({ kind: 'cisco-console', sev: 'high', title: 'Консольный порт без аутентификации', body: 'line con 0 без «login» (и без aaa new-model). Любой человек с физическим доступом получает доступ к CLI. Добавьте «login local».' });
+  const vty = cfg.ui.filter(u => /^vty/.test(u.name));
+  const noTo = cfg.ui.filter(u => u.opts.some(o => /^exec-timeout 0( 0)?$/.test(o)));
+  if (noTo.length) issues.push({ kind: 'cisco-timeout', sev: 'med', title: 'Сессии никогда не закрываются по бездействию', body: `exec-timeout 0 0 на line ${noTo.map(u => u.name).join(', ')}. Забытая сессия остаётся открытой бесконечно.` });
+  const telnet = vty.filter(u => u.opts.some(o => /^transport input .*\b(telnet|all)\b/.test(o)));
+  if (telnet.length) issues.push({ kind: 'cisco-telnet', sev: 'med', title: 'Разрешён вход по Telnet', body: `line ${telnet.map(u => u.name).join(', ')}: transport input разрешает telnet. Логины и пароли передаются открытым текстом — оставьте «transport input ssh».` });
+  if (vty.length && !cfg.aaaNewModel && vty.some(u => !u.opts.some(o => /^(login|access-class)\b/.test(o)))) issues.push({ kind: 'cisco-vty-login', sev: 'info', title: 'На части линий VTY нет «login»', body: 'Без «login» вход по такой линии невозможен (или открыт, если задано «no login»). Проверьте, что так задумано.' });
+  if (vty.length && !vty.some(u => u.opts.some(o => /^access-class\b/.test(o)))) issues.push({ kind: 'cisco-vty-acl', sev: 'info', title: 'Доступ по SSH не ограничен по адресам', body: 'На line vty нет access-class: подключиться может любой компьютер сети. Лучше разрешить вход только с адресов администраторов.' });
+  if (cfg.httpServer) issues.push({ kind: 'cisco-http', sev: 'med', title: 'Включён веб-интерфейс по HTTP', body: '«ip http server» — веб-управление без шифрования. Если веб не нужен, выключите (no ip http server), иначе оставьте только ip http secure-server.' });
+  if (cfg.snmp.communities) issues.push({ kind: 'cisco-snmp', sev: 'med', title: 'SNMP v1/v2c (community)', body: `Настроено community: ${cfg.snmp.communities}. Community передаются открытым текстом — ограничьте доступ ACL или перейдите на SNMPv3.` });
+  const plain = Object.values(cfg.aaa.users).filter(u => u.plain);
+  if (plain.length && !/^service password-encryption$/m.test(cfg.text)) issues.push({ kind: 'cisco-plainpw', sev: 'med', title: 'Пароли пользователей хранятся открытым текстом', body: `username ${plain.map(u => u.name).join(', ')} … password. Используйте «secret» вместо «password».` });
+  if (!/^ip ssh version 2$/m.test(cfg.text)) issues.push({ kind: 'cisco-ssh1', sev: 'info', title: 'Не задано «ip ssh version 2»', body: 'Без этой команды коммутатор может принимать устаревший SSH 1.' });
+}
+
 /* ---------- STP: настройки из конфигурации ---------- */
 function stpConfig(cfg) {
   const ls = (cfg.stpLines || []).map(x => x.split('\n')[0].trim());
   const has = re => ls.some(l => re.test(l));
+  if (cfg.vendor === 'cisco') {
+    const pr = ls.map(l => l.match(/^spanning-tree vlan \S+ priority (\d+)/)).find(Boolean);
+    return {
+      lines: cfg.stpLines || [],
+      mode: (ls.map(l => l.match(/^spanning-tree mode (\S+)/)).find(Boolean) || [])[1] || 'pvst',
+      priority: pr ? +pr[1] : has(/^spanning-tree vlan \S+ root primary/) ? 24576 : has(/^spanning-tree vlan \S+ root secondary/) ? 28672 : null,
+      bpduProtection: has(/^spanning-tree portfast (edge )?bpduguard default$/),
+      edgedDefault: has(/^spanning-tree portfast (edge )?default$/),
+      disabled: has(/^no spanning-tree vlan 1(\b|[,-])/),
+    };
+  }
   const pr = ls.map(l => l.match(/^stp (?:instance 0 )?priority (\d+)/)).find(Boolean);
   return {
     lines: cfg.stpLines || [],
@@ -407,7 +585,7 @@ function prepare(cfg) {
 }
 
 /* ---------- живое состояние (display interface brief / lldp / mac / arp) ---------- */
-const ST_LABEL = { up: 'up', down: 'down', admin: 'shutdown', lbdt: 'петля', standby: 'резерв' };
+const ST_LABEL = { up: 'up', down: 'down', admin: 'shutdown', lbdt: 'петля', standby: 'резерв', errdis: 'err-disabled' };
 
 function groupBy(arr, key) {
   const o = {};
@@ -431,7 +609,7 @@ function attachState(cfg, st) {
   if (upDown.length) cfg.issues.push({ kind: 'uplink-down', sev: 'high', live: true, title: 'Магистральный порт не работает', body: 'Порт аплинка или связи с другим коммутатором сейчас не в состоянии up.', ports: upDown });
   const errs = ports.filter(p => p.st.inErr + p.st.outErr > 0);
   const stp = st.stp;
-  if (stp && stp.bridge) {
+  if (stp && (stp.bridge || stp.root)) {
     const sc = stpConfig(cfg);
     const hasUplink = cfg.ports.some(p => p.role === 'uplink');
     if (stp.isRoot && hasUplink) cfg.issues.push({ kind: 'stp-root-self', sev: sc.priority != null ? 'info' : 'high', live: true,
@@ -458,7 +636,7 @@ function attachState(cfg, st) {
   for (const pr of (st.hw && st.hw.problems) || []) {
     const port = pr.port && cfg.ports.find(x => x.name === pr.port);
     cfg.issues.push({ kind: 'hw', data: { key: pr.key, cmd: pr.cmd }, sev: pr.sev, live: true, title: pr.text,
-      body: 'Обнаружено по данным оборудования (display device / power / fan / temperature / transceiver).', ports: port ? [port] : undefined });
+      body: cfg.vendor === 'cisco' ? 'Обнаружено по данным show environment / show interfaces status.' : 'Обнаружено по данным оборудования (display device / power / fan / temperature / transceiver).', ports: port ? [port] : undefined });
   }
   if (errs.length) cfg.issues.push({ kind: 'port-errors', sev: 'med', live: true, title: 'Ошибки на портах', body: 'Счётчики inErrors/outErrors не нулевые: возможна плохая линия, кабель или несогласованная скорость/дуплекс.', ports: errs });
   const order = { high: 0, med: 1, info: 2 };
@@ -524,10 +702,12 @@ function deviceInfo(mac) {
   const ad = name && DIR ? DIR.adByName.get(name.toUpperCase()) : null;
   const phone = PHONES ? PHONES.get(mac) : null;
   if (phone && phone.ip && !ips.includes(phone.ip)) ips.push(phone.ip);
+  const ap = WIFI.aps.get(mac) || null, sta = WIFI.sta.get(mac) || null;
+  for (const x of [ap, sta]) if (x && x.ip && !ips.includes(x.ip)) ips.push(x.ip);
   return {
-    mac, ips, name, source, lease, ad, phone,
+    mac, ips, name, source, lease, ad, phone, ap, sta,
     os: ad ? ad.os : '', ou: ad ? ouPath(ad.dn) : '', description: (ad && ad.description) || (lease && lease.description) || '',
-    known: !!(lease || ad || phone || source === 'dns'),
+    known: !!(lease || ad || phone || ap || source === 'dns'),
   };
 }
 
@@ -536,7 +716,13 @@ function phoneLabel(ph) {
   return `<span class="dev" title="${esc(t)}">☎ <b>${esc(ph.numbers.join(', ') || '—')}</b>${ph.names[0] ? ' ' + esc(ph.names[0]) : ''}</span>${ph.status !== 'registered' ? ' <span class="flag warn">не зарег.</span>' : ''}`;
 }
 
+function apLabel(ap) {
+  const ok = ap.state === 'nor' || ap.state === 'normal';
+  return `<span class="dev" title="${esc([ap.type, ap.stateText, ap.sta + ' клиентов'].filter(Boolean).join(' · '))}">📶 <b>${esc(ap.name)}</b></span>${ok ? '' : ` <span class="flag warn">${esc(ap.stateText)}</span>`}`;
+}
+
 function deviceLabel(d, withIp = true) {
+  if (d.ap && !d.name) return apLabel(d.ap) + (withIp && d.ips.length ? ` <span class="mono muted">${esc(d.ips[0])}</span>` : '');
   if (d.phone && !d.name) return phoneLabel(d.phone) + (withIp && d.ips.length ? ` <span class="mono muted">${esc(d.ips[0])}</span>` : '');
   if (!d.name) return withIp && d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : '';
   const title = [d.os, d.ou, d.description].filter(Boolean).join(' · ');
@@ -592,10 +778,17 @@ function unknownHtml(list, withSwitch) {
   </tbody></table></div>${list.length > 300 ? `<div class="foot">Показано 300 из ${list.length}</div>` : ''}`;
 }
 
+const isHuaweiSwitch = sw => !!sw && (!sw.type || sw.type === 'huawei');
+function devTitle(cfg) {
+  if (cfg.vendor === 'cisco') return 'Cisco IOS · коммутатор';
+  if (cfg.devType === 'huawei-ac') return 'Huawei · контроллер Wi‑Fi';
+  return 'Huawei · стек коммутаторов';
+}
+
 function render(cfg, sw = null) {
   CFG = cfg;
   $('#tab-cme').hidden = true;
-  $('#eyebrow').textContent = 'Huawei · стек коммутаторов';
+  $('#eyebrow').textContent = devTitle(cfg);
   if (!cfg.issues) prepare(cfg);
   $('#tab-all').hidden = true;
   $('#tabs').hidden = false;
@@ -635,7 +828,8 @@ function render(cfg, sw = null) {
   renderHardware(cfg, sw);
   renderStp(cfg, sw);
   renderLog(cfg, sw);
-  showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) || (state.tab === 'hw' && $('#hwTabBtn').hidden) ? 'overview' : state.tab);
+  renderWifi(cfg, sw);
+  showTab(state.tab === 'all' || (['history', 'standard'].includes(state.tab) && !sw) || (state.tab === 'hw' && $('#hwTabBtn').hidden) || (state.tab === 'wifi' && $('#wifiTabBtn').hidden) ? 'overview' : state.tab);
 }
 
 function ago(iso) {
@@ -698,6 +892,7 @@ function liveLegend(cfg) {
     ['down', 'down', n(s => s.status === 'down')],
     ['admin', 'shutdown', n(s => s.status === 'admin')],
     ['lbdt', 'петля', n(s => s.status === 'lbdt')],
+    ['errdis', 'err-disabled', n(s => s.status === 'errdis')],
     ['err', 'ошибки', n(s => s.inErr + s.outErr > 0)],
   ].filter(([k, , c]) => c || k === 'up' || k === 'down');
   return `<span class="legend-sep"></span><span class="legend-st">Сейчас (${esc(ago(cfg.state.at))}):</span>` +
@@ -1079,7 +1274,7 @@ function cmdBox(text) {
 }
 
 function fixHtml(issue, cfg) {
-  if (typeof Fixes === 'undefined') return '';
+  if (typeof Fixes === 'undefined' || (cfg && cfg.vendor === 'cisco')) return '';
   const vs = Fixes.forIssue(issue, cfg);
   if (!vs || !vs.length) return '';
   return `<details class="fix"><summary>Как исправить</summary>${vs.map(v => `<div class="fix-v">
@@ -1092,7 +1287,7 @@ function fixHtml(issue, cfg) {
 
 let PORT_TOOL = null; // { p, templates }
 function portToolHtml(p) {
-  if (typeof Fixes === 'undefined' || !CFG.profiles) return '';
+  if (typeof Fixes === 'undefined' || !CFG.profiles || CFG.vendor === 'cisco' || CFG.devType === 'huawei-ac') return '';
   const templates = Fixes.portTemplates(CFG);
   PORT_TOOL = { p, templates };
   return `<div class="sub">Команды для порта</div>
@@ -1186,13 +1381,19 @@ async function loadSwitches() {
     if (prev && prev.cfg && prev.lastFetch === s.lastFetch && prev.stateAt === s.stateAt) return { ...s, cfg: prev.cfg };
     const base = `api/switches/${encodeURIComponent(s.id)}`;
     let cfg;
-    try { cfg = prepare(parseConfig(await apiCall('GET', `${base}/config`))); }
+    try {
+      const text = await apiCall('GET', `${base}/config`);
+      const parsed = s.type === 'cisco-ios' ? parseConfigCisco(text) : parseConfig(text);
+      parsed.devType = s.type || 'huawei';
+      cfg = prepare(parsed);
+    }
     catch (e) { return { ...s, cfg: null, loadError: e.message }; }
     if (s.stateAt) {
       try { attachState(cfg, await apiCall('GET', `${base}/state`)); } catch (e) { /* состояние необязательно */ }
     }
     return { ...s, cfg };
   }));
+  buildWifi();
   fillSwitchSelect();
 }
 
@@ -1229,7 +1430,7 @@ function selectSwitch(id, tab) {
 function renderAll() {
   CFG = null;
   $('#tab-cme').hidden = true;
-  $('#eyebrow').textContent = 'Huawei · стек коммутаторов';
+  $('#eyebrow').textContent = 'Сеть · общий обзор';
   $('#tabs').hidden = true;
   $$('.tab').forEach(s => { s.hidden = s.id !== 'tab-all'; });
   setHash();
@@ -1302,9 +1503,10 @@ function renderAll() {
   renderHwTable(withCfg);
   renderStpAll(withCfg);
   renderLogAll(withCfg);
+  renderWifiAll(withCfg);
 
   // Соответствие эталону
-  renderStdMatrix(withCfg);
+  renderStdMatrix(withCfg.filter(isHuaweiSwitch));
 
   // Последние события
   const evShown = EVENTS.slice(0, 30);
@@ -1382,6 +1584,7 @@ function findDevice(q) {
   if (isIp) {
     const full = /^\d+\.\d+\.\d+\.\d+$/.test(q);
     for (const { cfg } of sources) for (const a of cfg.state.arp) if (full ? a.ip === q : a.ip.startsWith(q)) macs.add(a.mac);
+    for (const x of [...WIFI.sta.values(), ...WIFI.aps.values()]) if (x.ip && (full ? x.ip === q : x.ip.startsWith(q))) macs.add(x.mac);
   } else if (PHONES && PHONES.size && /^\d{2,}$/.test(q)) {
     // Внутренний номер
     for (const p of PHONES.values()) if (p.numbers.some(n => n === q || n.startsWith(q))) macs.add(p.mac);
@@ -1398,7 +1601,12 @@ function findDevice(q) {
       for (const l of DIR.byMac.values()) if (shortHost(l.host).toUpperCase() === c.name.toUpperCase()) macs.add(l.mac);
     }
   }
+  if (!isIp && q.length >= 2) {
+    const ql = q.toLowerCase();
+    for (const a of WIFI.aps.values()) if (a.name.toLowerCase().includes(ql)) macs.add(a.mac);
+  }
   if (isMac) {
+    for (const mac of [...WIFI.sta.keys(), ...WIFI.aps.keys()]) if (macHex(mac).includes(hex)) macs.add(mac);
     if (DEVICES) for (const mac of Object.keys(DEVICES.macs)) if (macHex(mac).includes(hex)) macs.add(mac);
     for (const { cfg } of sources) {
       for (const m of cfg.state.mac) if (macHex(m.mac).includes(hex)) macs.add(m.mac);
@@ -1451,9 +1659,10 @@ function showFind(q) {
     html = '<p class="muted">Нет данных о состоянии портов. Нажмите «Обновить», чтобы забрать их с коммутаторов.</p>';
   } else if (r.devices.length) {
     html = r.devices.map(d => `<div class="find-item">
-      <div class="h">${d.info.phone ? phoneLabel(d.info.phone) : ''}${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
+      <div class="h">${d.info.ap ? apLabel(d.info.ap) : ''}${d.info.phone ? phoneLabel(d.info.phone) : ''}${d.info.name ? deviceLabel(d.info, false) : ''}<span class="mono"><b>${esc(d.mac)}</b></span>${d.ips.length ? `<span class="mono">${esc(d.ips.join(', '))}</span>` : ''}</div>
       ${d.info.os || d.info.ou || d.info.description ? `<div class="muted" style="font-size:12.5px">${esc([d.info.os, d.info.ou, d.info.description].filter(Boolean).join(' · '))}</div>` : ''}
-      ${d.best ? `<div class="where">📍 Подключено: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).' + lastSeenText(d.mac)}</div>`}
+      ${d.info.sta ? `<div class="where">📶 Wi‑Fi: сеть <b>${esc(d.info.sta.ssid || '—')}</b> · точка <b>${esc(d.info.sta.apName)}</b> · ${esc(d.info.sta.band || '')} · сигнал <span class="${rssiClass(d.info.sta.rssi)}">${d.info.sta.rssi ?? '—'} дБм</span> · VLAN ${d.info.sta.vlan ?? '—'} <span class="muted">(${esc(d.info.sta.ac.name)})</span></div>` : ''}
+      ${d.best ? `<div class="where">📍 ${d.info.sta ? 'Трафик идёт через порт' : 'Подключено'}: ${loc(d.best)}</div>` : `<div class="where muted">${d.seen.length ? 'Конечный порт не найден — MAC виден только через аплинки.' : 'Сейчас не виден ни на одном коммутаторе (выключен или подключён к коммутатору, которого нет в списке).' + lastSeenText(d.mac)}</div>`}
       ${d.seen.filter(s => s !== d.best).length ? `<details><summary class="muted">Также виден через ${d.seen.filter(s => s !== d.best).length}</summary>
         ${d.seen.filter(s => s !== d.best).map(s => `<div class="muted" style="font-size:12.5px">${loc(s)}${s.p ? ' · ' + esc(ROLES[s.p.role].label.toLowerCase()) : ''}</div>`).join('')}</details>` : ''}
     </div>`).join('');
@@ -1480,7 +1689,7 @@ let pollSig = '';
 
 const EV_ICON = {
   unreachable: '⛔', recovered: '✅', 'config-changed': '📝', loop: '🔁', 'loop-cleared': '✅',
-  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️', 'stp-root': '🌳', 'stp-rootport': '🌿', log: '📜',
+  'uplink-down': '🔻', 'uplink-up': '🔺', errors: '⚠️', 'new-device': '➕', 'unknown-device': '❓', moved: '↔️', hw: '🛠', 'hw-ok': '✅', 'phone-unreg': '📵', 'phone-reg': '☎️', backup: '💾', restore: '♻️', 'restore-undo': '↩️', 'stp-root': '🌳', 'stp-rootport': '🌿', log: '📜', 'ap-down': '📴', 'ap-up': '📶', 'ap-new': '➕', 'ap-gone': '❔', 'ap-reboot': '🔄',
 };
 const EV_GROUPS = {
   important: e => e.sev === 'high' || e.sev === 'med',
@@ -1492,6 +1701,7 @@ const EV_GROUPS = {
   backup: e => ['backup', 'restore', 'restore-undo'].includes(e.type),
   stp: e => ['stp-root', 'stp-rootport'].includes(e.type),
   log: e => e.type === 'log',
+  wifi: e => /^ap-/.test(e.type),
 };
 
 function fmtTime(iso) {
@@ -1591,7 +1801,7 @@ function renderBackups(sw) {
       <td>${v.lines}</td>
       <td>${v.pinned ? `📌 ${esc(v.note || 'Резервная копия')} <button class="plink" data-unpin="${esc(v.ts)}" title="Снять закрепление: версия сможет удалиться при очистке">открепить</button>` : '<span class="muted">версия из истории</span>'}</td>
       <td><a class="plink" href="${base}${encodeURIComponent(v.ts)}?download=1" title="Пароли и ключи скрыты">.cfg</a> · <a class="plink" href="${base}${encodeURIComponent(v.ts)}?download=1&raw=1" title="Полная копия с зашифрованными паролями — для восстановления вручную">с паролями</a></td>
-      <td>${v.ts === vs[0].ts ? '' : `<button class="btn small" data-restore="${esc(v.ts)}">Восстановить…</button>`}</td>
+      <td>${v.ts === vs[0].ts || !isHuaweiSwitch(sw) ? '' : `<button class="btn small" data-restore="${esc(v.ts)}">Восстановить…</button>`}</td>
     </tr>`).join('')}
   </tbody></table></div>${vs.length > rows.length ? `<p class="hint" style="margin:8px 0 0">Показаны закреплённые копии и 10 последних версий. Все версии — в блоке «Что изменилось» ниже.</p>` : ''}`;
 }
@@ -1735,6 +1945,17 @@ async function poll() {
 /* ---------- телефония: Cisco CME ---------- */
 let CMES = [];
 let PHONES = null; // MAC → телефон
+let WIFI = { aps: new Map(), sta: new Map() }; // MAC → точка доступа / клиент Wi‑Fi (с контроллеров)
+
+function buildWifi() {
+  WIFI = { aps: new Map(), sta: new Map() };
+  for (const s of SWITCHES) {
+    const w = s.cfg && s.cfg.state && s.cfg.state.wlan;
+    if (!w) continue;
+    for (const a of w.aps) WIFI.aps.set(a.mac, { ...a, ac: s });
+    for (const x of w.stations) WIFI.sta.set(x.mac, { ...x, ac: s });
+  }
+}
 
 // Где подключён MAC сейчас: конечный порт (не аплинк)
 function locateMac(mac) {
@@ -2116,12 +2337,14 @@ function renderStp(cfg, sw) {
   const sc = stpConfig(cfg);
   const stp = cfg.state && cfg.state.stp && cfg.state.stp.bridge ? cfg.state.stp : null;
   const issues = cfg.issues.filter(i => /^stp-/.test(i.kind || ''));
+  const ciscoRoot = cfg.vendor === 'cisco' && cfg.state && cfg.state.stp && cfg.state.stp.root ? cfg.state.stp : null;
   $('#stpCount').textContent = issues.filter(i => i.sev !== 'info').length || '';
   const rp = stp && stp.rootPort ? cfg.ports.find(p => p.name === stp.rootPort) : null;
   const rootName = stp ? (stp.isRoot ? 'этот коммутатор' : bridgeName(stp.root) || (rp && rp.lldp && rp.lldp[0] ? `за портом — сосед ${rp.lldp[0].device}` : '')) : '';
   $('#stpSummary').innerHTML = `<dl class="kv">
       <dt>Состояние</dt><dd>${sc.disabled || (stp && stp.disabled) ? '<span class="flag warn">выключен</span>' : '<span class="flag">включён</span>'}</dd>
       <dt>Режим</dt><dd>${esc((stp && stp.mode) || sc.mode.toUpperCase() || 'MSTP (по умолчанию)')}</dd>
+      ${ciscoRoot ? `<dt>Корень (VLAN ${(ciscoRoot.vlans.find(v => v.vlan === 20) || ciscoRoot.vlans.find(v => v.vlan === 1) || ciscoRoot.vlans[0]).vlan})</dt><dd>${ciscoRoot.isRoot ? '<b>этот коммутатор</b>' : esc(bridgeName(ciscoRoot.root) || ciscoRoot.root)}</dd>` : ''}
       <dt>Приоритет моста</dt><dd>${sc.priority != null ? `<b>${sc.priority}</b> (задан в конфигурации)` : '32768 (по умолчанию)'}</dd>
       ${stp ? `<dt>Этот мост</dt><dd class="mono">${esc(stp.bridge)}</dd>
       <dt>Корневой мост</dt><dd><span class="mono">${esc(stp.root)}</span>${rootName ? ` <span class="muted">— ${esc(rootName)}</span>` : ''}</dd>
@@ -2132,6 +2355,19 @@ function renderStp(cfg, sw) {
     ${sc.lines.length ? `<div class="sub">Глобальные настройки STP</div><pre>${esc(sc.lines.join('\n'))}</pre>` : '<p class="hint" style="margin:10px 0 0">Глобальных настроек STP в конфигурации нет — используются значения по умолчанию.</p>'}`;
 
   const tcPort = stp && stp.lastTcPort ? cfg.ports.find(p => p.name === stp.lastTcPort) : null;
+  const cst = cfg.vendor === 'cisco' && cfg.state && cfg.state.stp && cfg.state.stp.vlans ? cfg.state.stp : null;
+  if (cst) {
+    $('#stpTc').innerHTML = cst.vlans.length ? `<dl class="kv">
+        <dt>BPDU Guard</dt><dd>${sc.bpduProtection ? '<span class="flag">включён</span>' : '<span class="flag warn">выключен</span>'}</dd>
+        <dt>Portfast по умолчанию</dt><dd>${sc.edgedDefault ? 'да' : 'нет'}</dd>
+      </dl>
+      <div class="sub">Корневой мост по VLAN</div>
+      <table class="tbl static"><thead><tr><th>VLAN</th><th>Корневой мост</th><th>Стоимость</th><th>Корневой порт</th></tr></thead><tbody>
+      ${cst.vlans.map(v => { const p = v.rootPort && cfg.ports.find(x => x.name === v.rootPort); const nm = bridgeName(v.rootMac);
+        return `<tr><td><b>${v.vlan}</b></td><td class="mono">${esc(v.priority + '.' + v.rootMac)}${!v.rootPort && !v.cost ? ' <span class="flag">этот коммутатор</span>' : nm ? ` <span class="muted">— ${esc(nm)}</span>` : ''}</td><td>${v.cost}</td>
+          <td>${p ? portLink(p) + (p.desc ? ` <span class="muted">${esc(p.desc)}</span>` : '') : esc(v.rootPort || '—')}</td></tr>`; }).join('')}
+      </tbody></table>` : '<p class="muted" style="margin:0">STP не работает ни в одном VLAN (или команда show spanning-tree root не выполнилась).</p>';
+  } else
   $('#stpTc').innerHTML = stp ? `<dl class="kv">
       <dt>Изменений топологии</dt><dd><b>${stp.tcCount}</b> <span class="muted">(получено TC/TCN: ${stp.tcReceived})</span></dd>
       <dt>Последнее</dt><dd>${stp.lastTcSec != null ? esc(fmtUptime(stp.lastTcSec)) + ' назад' : '—'}</dd>
@@ -2149,7 +2385,7 @@ function renderStp(cfg, sw) {
       ${i.ports ? `<div class="ip"><span class="mono muted">${esc(compressPorts(i.ports))}</span></div>` : ''}
       ${fixHtml(i, cfg)}</div>`).join('');
   renderStpPorts(cfg);
-  $('#stpNote').textContent = stp ? `Данные ${ago(cfg.state.at)}. Учитывается экземпляр 0 (CIST).` : '';
+  $('#stpNote').textContent = cst ? `Данные ${ago(cfg.state.at)}. Cisco считает STP отдельно для каждого VLAN (${cst.mode}).` : stp ? `Данные ${ago(cfg.state.at)}. Учитывается экземпляр 0 (CIST).` : '';
 }
 
 function renderStpPorts(cfg) {
@@ -2184,10 +2420,10 @@ function renderStpPorts(cfg) {
 }
 
 function renderStpAll(withCfg) {
-  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.stp && s.cfg.state.stp.bridge);
+  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.stp && (s.cfg.state.stp.bridge || s.cfg.state.stp.root));
   $('#stpAllCard').hidden = !rows.length;
   if (!rows.length) return;
-  const roots = [...new Set(rows.map(s => s.cfg.state.stp.root))];
+  const roots = [...new Map(rows.map(s => [String(s.cfg.state.stp.root).split('.').pop(), s.cfg.state.stp.root])).values()];
   $('#stpAllWarn').innerHTML = roots.length > 1 ? `<div class="issue sev-high" style="padding:8px 12px;margin-bottom:10px"><div class="ih"><span class="sev">Важно</span>
       <span class="it">У коммутаторов разные корневые мосты: ${roots.map(r => esc(bridgeName(r) || r)).join(', ')}</span></div>
       <div class="ib">В одной сети корень должен быть один. Возможно, сеть разделена на несвязанные части, или где-то STP выключен на линке.</div></div>`
@@ -2208,6 +2444,85 @@ function renderStpAll(withCfg) {
         <td>${iss.length ? iss.map(i => `<span class="flag warn" title="${esc(i.title)}">${esc(i.title.length > 38 ? i.title.slice(0, 37) + '…' : i.title)}</span>`).join(' ') : '<span class="flag">норма</span>'}</td>
       </tr>`;
     }).join('') + '</tbody>';
+}
+
+/* ---------- Wi‑Fi: контроллер ---------- */
+const rssiClass = v => 'rssi ' + (v == null ? '' : v >= -65 ? 'good' : v >= -75 ? 'mid' : 'bad');
+const apOk = a => a.state === 'nor' || a.state === 'normal';
+
+function renderWifi(cfg, sw) {
+  const w = cfg.state && cfg.state.wlan;
+  $('#wifiTabBtn').hidden = !w;
+  if (!w) return;
+  const bad = w.aps.filter(a => !apOk(a));
+  $('#wifiCount').textContent = bad.length || '';
+  const b24 = w.stations.filter(x => /2\.4/.test(x.band)).length, b5 = w.stations.filter(x => /^5/.test(x.band)).length;
+  $('#wifiStats').innerHTML = [
+    { v: w.aps.length, l: 'Точек доступа', s: `${w.aps.length - bad.length} работают` },
+    { v: bad.length, l: 'Не работают', s: bad.length ? bad.slice(0, 3).map(a => a.name).join(', ') + (bad.length > 3 ? '…' : '') : 'все на связи' },
+    { v: w.stations.length, l: 'Клиентов сейчас', s: `2.4 ГГц: ${b24}, 5 ГГц: ${b5}` },
+    { v: w.ssids.filter(x => x.ssid).length, l: 'Сетей (SSID)', s: w.ssids.filter(x => x.ssid).map(x => x.ssid).join(', ') },
+  ].map(i => `<div class="stat"><div class="v">${i.v}</div><div class="l">${i.l}</div>${i.s ? `<div class="s">${esc(i.s)}</div>` : ''}</div>`).join('');
+
+  const SEV = { high: 'Важно', med: 'Внимание', info: 'Инфо' };
+  $('#wifiProblemsCard').hidden = !w.problems.length;
+  $('#wifiProblems').innerHTML = w.problems.map(p => `<div class="issue sev-${p.sev}" style="padding:8px 12px">
+      <div class="ih"><span class="sev">${SEV[p.sev]}</span><span class="it">${esc(p.text)}</span></div>
+      ${p.cmd ? `<details class="fix"><summary>Как проверить</summary>${cmdBox(p.cmd)}</details>` : ''}</div>`).join('');
+  renderWifiAps(w);
+
+  $('#wifiSsids').innerHTML = `<thead><tr><th>SSID</th><th>Защита</th><th>Включена на точках</th><th>Клиентов</th><th>VLAN клиентов</th></tr></thead><tbody>${
+    w.ssids.map(x => `<tr><td><b>${esc(x.ssid || '—')}</b>${x.wlan != null ? ` <span class="muted">WLAN ${x.wlan}</span>` : ''}</td><td>${esc(x.auth || '—')}</td>
+      <td>${x.vaps ? `${x.on} из ${x.vaps}` : '—'}</td><td>${x.clients}</td><td>${x.vlans.sort((a, b) => a - b).map(v => vlanChip(v, cfg)).join(' ') || '—'}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="muted">Нет данных (команда display vap all не выполнилась)</td></tr>'}</tbody>`;
+  renderWifiClients(cfg);
+  const failed = Object.keys(cfg.state.errors || {}).filter(c => /^display (ap|station|vap)/.test(c));
+  $('#wifiNote').textContent = `Данные ${ago(cfg.state.at)}.` + (failed.length ? ` Не выполнились: ${failed.join(', ')}.` : '');
+}
+
+function renderWifiAps(w) {
+  const f = $('#apFilter').value;
+  const list = w.aps.filter(a => !f || (f === 'bad' ? !apOk(a) : apOk(a))).sort((a, b) => apOk(a) - apOk(b) || a.name.localeCompare(b.name, 'ru', { numeric: true }));
+  $('#wifiAps').innerHTML = `<thead><tr><th>Точка</th><th>Состояние</th><th>IP</th><th>MAC</th><th>Модель</th><th>Группа</th><th>Клиентов</th><th>Работает</th><th>Где подключена</th></tr></thead><tbody>${
+    list.map(a => { const at = SERVER ? locateMac(a.mac) : null; return `<tr>
+      <td><b>${esc(a.name)}</b></td>
+      <td>${apOk(a) ? '<span class="live live-up">работает</span>' : `<span class="flag warn">${esc(a.stateText)}</span>`}${a.extra ? ` <span class="muted" style="font-size:12px">${esc(a.extra)}</span>` : ''}</td>
+      <td class="mono">${esc(a.ip || '—')}</td><td class="mono">${esc(a.mac)}</td><td>${esc(a.type || '—')}</td><td>${esc(a.group || '—')}</td>
+      <td>${a.sta}</td><td>${a.uptimeSec != null ? esc(fmtUptime(a.uptimeSec)) : '—'}</td>
+      <td>${at ? `<b>${esc(at.sw ? at.sw.name : '')}</b> · ${gotoLink(at.sw, at.p)}${at.p.desc ? ` <span class="muted">${esc(at.p.desc)}</span>` : ''}` : '<span class="muted">не найдена</span>'}</td>
+    </tr>`; }).join('') || '<tr><td colspan="9" class="muted">Нет точек под этот фильтр</td></tr>'}</tbody>`;
+}
+
+function renderWifiClients(cfg) {
+  const w = cfg.state.wlan;
+  const q = $('#staSearch').value.trim().toLowerCase(), f = $('#staFilter').value;
+  const rows = w.stations.map(x => ({ x, d: deviceInfo(x.mac) })).filter(({ x, d }) => {
+    if (f === 'weak' && !(x.rssi != null && x.rssi < -75)) return false;
+    if (f === 'unknown' && d.known) return false;
+    if (!q) return true;
+    return [x.mac, x.ip, x.apName, x.ssid, d.name, d.description, d.phone && d.phone.numbers.join(' ')].some(v => String(v || '').toLowerCase().includes(q));
+  }).sort((a, b) => a.x.apName.localeCompare(b.x.apName, 'ru', { numeric: true }) || (b.x.rssi ?? -999) - (a.x.rssi ?? -999));
+  $('#wifiClientsN').textContent = `(${rows.length}${rows.length !== w.stations.length ? ' из ' + w.stations.length : ''})`;
+  $('#wifiClients').innerHTML = `<thead><tr><th>Устройство</th><th>MAC</th><th>IP</th><th>SSID</th><th>VLAN</th><th>Точка</th><th>Диапазон</th><th>Сигнал</th><th>Скорость, Мбит/с</th></tr></thead><tbody>${
+    rows.slice(0, 500).map(({ x, d }) => `<tr>
+      <td>${d.name || d.phone ? deviceLabel(d, false) : '<span class="flag warn" title="Нет в DHCP / AD / DNS">неизвестно</span>'}</td>
+      <td class="mono">${esc(x.mac)}</td><td class="mono">${esc(x.ip || d.ips[0] || '—')}</td>
+      <td>${esc(x.ssid || '—')}</td><td>${x.vlan != null ? vlanChip(x.vlan, cfg) : '—'}</td>
+      <td>${esc(x.apName)}</td><td>${esc([x.band, x.phy].filter(Boolean).join(' · ') || '—')}</td>
+      <td><span class="${rssiClass(x.rssi)}">${x.rssi ?? '—'}</span></td>
+      <td class="mono">${x.rx != null ? `${x.rx} / ${x.tx}` : '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="9" class="muted">Клиентов нет</td></tr>'}</tbody>`;
+}
+
+function renderWifiAll(withCfg) {
+  const rows = withCfg.filter(s => s.cfg.state && s.cfg.state.wlan);
+  $('#wifiAllCard').hidden = !rows.length;
+  if (!rows.length) return;
+  $('#wifiAll').innerHTML = `<thead><tr><th>Контроллер</th><th>Точек</th><th>Не работают</th><th>Клиентов</th><th>SSID</th></tr></thead><tbody>${
+    rows.map(s => { const w = s.cfg.state.wlan, bad = w.aps.filter(a => !apOk(a)); return `<tr data-open-sw="${esc(s.id)}" data-open-tab="wifi">
+      <td><b>${esc(s.name)}</b></td><td>${w.aps.length}</td>
+      <td>${bad.length ? bad.map(a => `<span class="flag warn" title="${esc(a.stateText)}">${esc(a.name)}</span>`).join(' ') : '<span class="flag">все работают</span>'}</td>
+      <td>${w.stations.length}</td><td>${esc(w.ssids.map(x => x.ssid).filter(Boolean).join(', ') || '—')}</td></tr>`; }).join('')}</tbody>`;
 }
 
 /* ---------- оборудование и схема сети (этап 5) ---------- */
@@ -2422,7 +2737,7 @@ function changeChips(lines) {
 }
 
 function renderStandard(cfg, sw) {
-  const on = SERVER && !!sw && typeof Standard !== 'undefined';
+  const on = SERVER && !!sw && typeof Standard !== 'undefined' && isHuaweiSwitch(sw);
   $('#standardTabBtn').hidden = !on;
   if (!on) return;
   if (!STD) {
@@ -2598,6 +2913,9 @@ function cfgFor(el) {
 
 function bind() {
   $('#tabs').addEventListener('click', e => { const b = e.target.closest('button[data-tab]'); if (b) showTab(b.dataset.tab); });
+  $('#apFilter').addEventListener('change', () => { if (CFG && CFG.state && CFG.state.wlan) renderWifiAps(CFG.state.wlan); });
+  $('#staSearch').addEventListener('input', () => { if (CFG && CFG.state && CFG.state.wlan) renderWifiClients(CFG); });
+  $('#staFilter').addEventListener('change', () => { if (CFG && CFG.state && CFG.state.wlan) renderWifiClients(CFG); });
 
   $('#drawerBody').addEventListener('change', e => { if (e.target.id === 'tplSelect') updatePortTool(); });
   $('#drawerBody').addEventListener('submit', e => { if (e.target.id === 'stdForm') { e.preventDefault(); saveStdForm(); } });
