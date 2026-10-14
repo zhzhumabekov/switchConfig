@@ -234,7 +234,7 @@ async function main() {
   console.log(`Подключаюсь к ${opt.host}:${opt.port}…`);
   const config = await fetchConfig(opt, password);
   const lineCount = config.split('\n').length - 1;
-  if (lineCount < 10 || !/^sysname /m.test(config)) throw new Error('Получен подозрительно короткий вывод — файл не перезаписан.');
+  if (lineCount < 10 || !/^ ?sysname /m.test(config)) throw new Error('Получен подозрительно короткий вывод — файл не перезаписан.');
 
   // Предыдущую версию сохраняем рядом, чтобы можно было сравнить или откатиться
   if (fs.existsSync(out)) {

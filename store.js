@@ -75,7 +75,7 @@ function seed() {
   const old = path.join(__dirname, '3floor.txt');
   if (fs.existsSync(old)) {
     const text = fs.readFileSync(old, 'utf8').replace(/\r/g, '');
-    const sysname = (text.match(/^sysname\s+(\S+)/m) || [])[1] || '';
+    const sysname = (text.match(/^ ?sysname\s+(\S+)/m) || [])[1] || '';
     // Адрес берём из первого IP-интерфейса в самом конфиге; логин пользователь укажет в настройках
     const host = (text.match(/^interface Vlanif\d+\n(?: .*\n)*? ip address (\S+)/m) || [])[1] || '';
     const id = makeId(sysname || 'switch', list);

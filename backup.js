@@ -72,7 +72,7 @@ async function restore(id, ts, confirmName) {
   if (!sw.secret) throw new UserError('Пароль не сохранён — укажите его в настройках');
   const text = history.readVersion(id, ts);
   if (text == null) throw new UserError('Версия не найдена', 404);
-  if (!/^sysname /m.test(text) || !/^return\s*$/m.test(text)) throw new UserError('Версия неполная (нет sysname или return) — восстанавливать её нельзя');
+  if (!/^ ?sysname /m.test(text) || !/^return\s*$/m.test(text)) throw new UserError('Версия неполная (нет sysname или return) — восстанавливать её нельзя');
 
   const log = [];
   const step = (ok, msg) => { log.push({ ok, msg }); };

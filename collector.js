@@ -113,7 +113,7 @@ async function collect(id, { config = true, reason = 'manual' } = {}) {
     let changed = false, diff = null;
     if (config) {
       text = isCisco ? ciscoState.extractConfig(outputs.shift()) : extract(outputs.shift());
-      if (!(isCisco ? /^hostname /m : /^sysname /m).test(text)) throw new Error('Получен неполный вывод — конфигурация не сохранена');
+      if (!(isCisco ? /^hostname /m : /^ ?sysname /m).test(text)) throw new Error('Получен неполный вывод — конфигурация не сохранена');
       // Первая версия истории — из того, что уже было сохранено раньше
       history.seedConfig(id, store.readConfig(id), sw.lastFetch);
       changed = store.writeConfig(id, text);
@@ -140,7 +140,7 @@ async function collect(id, { config = true, reason = 'manual' } = {}) {
       const now = new Date().toISOString();
       if (config) {
         cur.lastFetch = now;
-        cur.sysname = (text.match(/^(?:sysname|hostname)\s+(\S+)/m) || [])[1] || cur.sysname;
+        cur.sysname = (text.match(/^ ?(?:sysname|hostname)\s+(\S+)/m) || [])[1] || cur.sysname;
         if (changed) cur.lastChange = now;
       }
       cur.stateAt = state.at;
