@@ -2,3 +2,6 @@ node_modules/
 data/
 *.txt
 config.js
+
+# Инструкции с внутренними адресами и схемой сети
+docs/wifi-setup/

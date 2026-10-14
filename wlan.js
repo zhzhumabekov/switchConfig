@@ -41,7 +41,7 @@ function parseAps(text) {
     out.push({
       id: +t[0], mac: t[1].toLowerCase(), name: t.slice(2, si - 3).join(' ') || t[1], group: dash(t[si - 3]),
       ip: dash(t[si - 2]), type: dash(t[si - 1]), state: t[si].toLowerCase(), stateText: AP_STATE[t[si].toLowerCase()] || t[si],
-      sta: /^\d+$/.test(t[si + 1] || '') ? +t[si + 1] : 0, uptime: dash(t[si + 2]), uptimeSec: uptimeSec(t[si + 2]), extra: dash(t.slice(si + 3).join(' ')),
+      sta: /^\d+$/.test(t[si + 1] || '') ? +t[si + 1] : 0, uptime: dash(t[si + 2]), uptimeSec: uptimeSec(t[si + 2]), extra: dash(t[si + 3]), // дальше в V200R024 идёт колонка Scene
     });
   }
   return out;
@@ -53,6 +53,7 @@ STA MAC          AP ID Ap name     Rf/WLAN  Band  Type  Rx/Tx      RSSI  VLAN  I
 */
 function parseStations(text) {
   const out = [];
+  const tail = /Online time/i.test(text) ? 1 : 0; // V200R024: после SSID идёт время подключения
   for (const l of lines(text)) {
     const t = l.trim().split(/\s+/);
     if (t.length < 8 || !MAC.test(t[0]) || !/^\d+$/.test(t[1])) continue;
@@ -63,7 +64,8 @@ function parseStations(text) {
       mac: t[0].toLowerCase(), apId: +t[1], apName: t.slice(2, ri).join(' '), radio: t[ri], band: dash(t[ri + 1]), phy: dash(t[ri + 2]),
       rx: Number.isFinite(rx) ? rx : null, tx: Number.isFinite(tx) ? tx : null,
       rssi: /^-?\d+$/.test(t[ri + 4] || '') ? +t[ri + 4] : null, vlan: /^\d+$/.test(t[ri + 5] || '') ? +t[ri + 5] : null,
-      ip: /^\d+\.\d+\.\d+\.\d+$/.test(t[ri + 6] || '') ? t[ri + 6] : '', ssid: t.slice(ri + 7).join(' '),
+      ip: /^\d+\.\d+\.\d+\.\d+$/.test(t[ri + 6] || '') ? t[ri + 6] : '',
+      ssid: t.slice(ri + 7, tail && t.length > ri + 8 ? -tail : undefined).join(' '), online: tail && t.length > ri + 8 ? t[t.length - 1] : '',
     });
   }
   return out;
@@ -75,6 +77,7 @@ AP ID AP name   RfID WID  BSSID          Status  Auth type     STA   SSID
 */
 function parseVaps(text) {
   const out = [];
+  const tail = /Radio Type/i.test(text) ? 1 : 0; // V200R024: после SSID идёт тип радио (11be…)
   for (const l of lines(text)) {
     const t = l.trim().split(/\s+/);
     const bi = t.findIndex(x => MAC.test(x));
@@ -83,7 +86,8 @@ function parseVaps(text) {
     const staIdx = t.findIndex((x, i) => i > bi + 1 && /^\d+$/.test(x));
     out.push({
       apId: +t[0], apName: t.slice(1, bi - 2).join(' '), radio: +t[bi - 2], wlan: +t[bi - 1], bssid: t[bi].toLowerCase(), status: st,
-      auth: staIdx > 0 ? t.slice(bi + 2, staIdx).join(' ') : '', sta: staIdx > 0 ? +t[staIdx] : 0, ssid: staIdx > 0 ? t.slice(staIdx + 1).join(' ') : '',
+      auth: staIdx > 0 ? t.slice(bi + 2, staIdx).join(' ') : '', sta: staIdx > 0 ? +t[staIdx] : 0, ssid: staIdx > 0 ? t.slice(staIdx + 1, tail && t.length > staIdx + 2 ? -tail : undefined).join(' ') : '',
+      radioType: tail && t.length > staIdx + 2 ? t[t.length - 1] : '',
     });
   }
   return out;
@@ -103,6 +107,9 @@ function problems(aps, stations) {
     const sev = ['fault', 'idle', 'config-failed', 'commit-failed', 'verunmatch', 'name-conflicted'].includes(a.state) ? 'high' : 'med';
     add(`ap:${a.mac}`, sev, `Точка доступа ${a.name}: ${a.stateText}${a.extra ? ' (' + a.extra + ')' : ''}`, { mac: a.mac, cmd: `display ap all\ndisplay ap online-fail-record ap-mac ${a.mac}` });
   }
+  // ExtraInfo «P» — точке не хватает питания PoE, часть радио может быть выключена
+  const lowPower = aps.filter(a => /^P$/.test(a.extra));
+  if (lowPower.length) add('poe', 'med', `Недостаточно питания PoE: ${lowPower.map(a => a.name).join(', ')}`, { cmd: lowPower.map(a => `display ap run-info ap-name ${a.name}`).join('\n') + '\n# на коммутаторе: display poe power-state interface <порт точки>' });
   const weak = stations.filter(s => s.rssi != null && s.rssi < -75);
   if (weak.length >= 3) add('weak', 'info', `${weak.length} ${pl(weak.length, 'клиент', 'клиента', 'клиентов')} со слабым сигналом (RSSI ниже −75 дБм)`, { cmd: 'display station all' });
   const loaded = aps.filter(a => a.sta >= 40);
