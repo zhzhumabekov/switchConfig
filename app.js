@@ -1218,56 +1218,319 @@ function renderRaw(cfg) {
 /* =====================================================================
    Детали порта (боковая панель)
    ===================================================================== */
+/* ---------- панель порта: вкладки «Обзор», «Настройка», «Конфигурация» ---------- */
+let PORT_TAB = 'overview'; // последняя открытая вкладка — сохраняется при переходе к другому порту
+
 function openPort(name) {
   if (!CFG) return;
   const p = CFG.ports.find(x => x.name === name);
   if (!p) return;
-  const prof = CFG.profiles.find(g => g.ports.includes(p));
-  const same = prof ? prof.ports.filter(x => x !== p) : [];
-  const issues = CFG.issues.filter(i => i.ports && i.ports.includes(p));
+  const settings = portSettingsHtml(p);
+  const tabs = [['overview', 'Обзор'], ...(settings ? [['settings', 'Настройка']] : []), ['config', 'Конфигурация']];
+  if (!tabs.some(([id]) => id === PORT_TAB)) PORT_TAB = 'overview';
+  const panel = (id, html) => `<section id="pd-${id}" role="tabpanel" aria-labelledby="pdTab-${id}"${id === PORT_TAB ? '' : ' hidden'}>${html}</section>`;
   $('#drawerTitle').textContent = p.name;
   $('#drawerBody').innerHTML = `
-    <dl class="kv">
-      <dt>Роль</dt><dd>${roleChip(p.role)}</dd>
-      <dt>Член стека</dt><dd>Slot ${p.slot}, порт ${p.idx} (${p.type === 'xge' ? '10G SFP+' : '1G'})</dd>
-      <dt>Описание</dt><dd>${esc(p.desc || '—')}</dd>
-      ${p.portDesc ? `<dt>port description</dt><dd>${esc(p.portDesc)}</dd>` : ''}
-      <dt>Режим</dt><dd>${esc(p.linkType || '—')}</dd>
-      <dt>PVID</dt><dd>${p.effPvid != null ? vlanChip(p.effPvid, CFG) + (p.pvid == null ? ' <span class="muted">(не задан, по умолчанию 1)</span>' : '') : '—'}</dd>
-      <dt>Разрешённые VLAN</dt><dd>${p.allowed.length ? vlanChipsFromRanges(p.allowed, CFG) : '—'}</dd>
-      <dt>Опции</dt><dd>${portFlags(p) || '—'}</dd>
-    </dl>
-    ${CFG.state ? livePortHtml(p) : ''}
-    ${SERVER && state.current && state.current !== 'all' ? portHistoryHtml(state.current, p.name) : ''}
-    ${issues.length ? `<div class="sub">Замечания</div>${issues.map(i => `<div class="issue sev-${i.sev}" style="padding:8px 12px"><div class="it">${esc(i.title)}</div></div>`).join('')}` : ''}
-    ${portEditHtml(p)}
-    ${portToolHtml(p)}
-    <div class="sub">Конфигурация</div>
-    <pre>interface ${esc(p.name)}${p.lines.length ? '\n' + esc(p.lines.map(l => ' ' + l).join('\n')) : '\n <span class="muted"># нет настроек</span>'}</pre>
-    ${same.length ? `<div class="sub">Такие же настройки ещё у ${same.length} ${plural(same.length, 'порта', 'портов', 'портов')}</div><div class="mono muted" style="font-size:12px">${esc(compressPorts(same))}</div>` : '<div class="sub">Уникальная конфигурация</div>'}
-  `;
+    <div class="pd-head">${roleChip(p.role)}${CFG.state ? liveBadge(p) : ''}<span class="muted">${p.type === 'xge' ? '10G SFP+' : '1G'}</span></div>
+    <div class="tabs pd-tabs" role="tablist" aria-label="Разделы порта">${tabs.map(([id, label]) =>
+      `<button type="button" role="tab" id="pdTab-${id}" aria-controls="pd-${id}" aria-selected="${id === PORT_TAB}" tabindex="${id === PORT_TAB ? 0 : -1}" class="${id === PORT_TAB ? 'active' : ''}" data-pd-tab="${id}">${label}</button>`).join('')}</div>
+    ${panel('overview', portOverviewHtml(p))}
+    ${settings ? panel('settings', settings) : ''}
+    ${panel('config', portConfigHtml(p))}`;
   $('#drawer').classList.add('open');
   $('#drawer').setAttribute('aria-hidden', 'false');
   $('#scrim').hidden = false;
-  updatePortTool();
-  updatePortEdit();
+  if (settings) updatePortSettings();
 }
-function livePortHtml(p) {
-  const st = p.st;
+
+function showPortTab(id, focus) {
+  PORT_TAB = id;
+  for (const b of $$('[data-pd-tab]')) {
+    const on = b.dataset.pdTab === id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on);
+    b.tabIndex = on ? 0 : -1;
+    if (on && focus) b.focus();
+  }
+  for (const s of $$('#drawerBody [role="tabpanel"]')) s.hidden = s.id !== `pd-${id}`;
+}
+
+// Обзор: что настроено и что происходит на порту — каждое значение один раз
+function portOverviewHtml(p) {
+  const rows = [];
+  rows.push(['Описание', esc(p.desc || '—') + (p.portDesc ? ` <span class="muted">· port description: ${esc(p.portDesc)}</span>` : '')]);
+  if (CFG.state) {
+    const st = p.st;
+    rows.push(['Сейчас', st
+      ? `вход ${esc(st.inUti || '—')} · выход ${esc(st.outUti || '—')} · ${st.inErr + st.outErr ? `<span class="pd-bad">ошибки: вход ${st.inErr}, выход ${st.outErr}</span>` : 'без ошибок'} <span class="muted">· ${esc(ago(CFG.state.at))}</span>`
+      : '<span class="muted">нет в display interface brief</span>']);
+  }
+  if (p.lines.length) {
+    const pvid = p.effPvid != null ? `, PVID ${vlanChip(p.effPvid, CFG)}${p.pvid == null ? ' <span class="muted">(по умолчанию)</span>' : ''}` : '';
+    rows.push(['Режим', esc(p.linkType || 'не задан') + pvid]);
+    if (p.allowed.length) rows.push(['Разрешены', vlanChipsFromRanges(p.allowed, CFG)]);
+  }
+  const flags = portFlags(p);
+  if (flags) rows.push(['Опции', flags]);
+  if (p.lldp && p.lldp.length) rows.push(['Сосед', p.lldp.map(n => `<b>${esc(n.device || '?')}</b> <span class="muted">порт</span> <span class="mono">${esc(n.remotePort || '—')}</span>`).join('<br>')]);
+
+  const issues = CFG.issues.filter(i => i.ports && i.ports.includes(p));
+  return `<dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${issues.length ? `<div class="sub">Замечания</div>${issues.map(i => `<div class="issue pd-issue sev-${i.sev}"><div class="it">${esc(i.title)}</div></div>`).join('')}` : ''}
+    ${CFG.state ? portMacsHtml(p) : ''}
+    ${SERVER && state.current && state.current !== 'all' ? portHistoryHtml(state.current, p.name) : ''}`;
+}
+
+function portMacsHtml(p) {
   const macs = p.macs || [];
   const MAX = 50;
-  return `<div class="sub">Сейчас <span class="muted" style="text-transform:none;letter-spacing:0">· данные ${esc(ago(CFG.state.at))}</span></div>
-    ${st ? `<dl class="kv">
-      <dt>Состояние</dt><dd>${liveBadge(p)} <span class="muted mono">PHY ${esc(st.phy)} / Protocol ${esc(st.proto)}</span></dd>
-      <dt>Загрузка</dt><dd>вход ${esc(st.inUti || '—')} · выход ${esc(st.outUti || '—')}</dd>
-      <dt>Ошибки</dt><dd>${st.inErr + st.outErr ? `<span style="color:var(--sev-high)">вход ${st.inErr}, выход ${st.outErr}</span>` : 'нет'}</dd>
-    </dl>` : '<div class="muted">Порт не найден в выводе display interface brief.</div>'}
-    ${p.lldp.length ? `<div class="sub">LLDP-сосед</div><ul class="list">${p.lldp.map(n => `<li><span class="grow"><b>${esc(n.device || '?')}</b></span><span class="muted">порт</span> <span class="mono">${esc(n.remotePort || '—')}</span></li>`).join('')}</ul>` : ''}
-    <div class="sub">MAC-адреса на порту (${macs.length})</div>
-    ${macs.length ? `<table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP</th>${DIR || (PHONES && PHONES.size) ? '<th>Устройство</th>' : ''}</tr></thead><tbody>
-      ${macs.slice(0, MAX).map(m => { const d = deviceInfo(m.mac); return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${DIR || (PHONES && PHONES.size) ? `<td>${d.name || d.phone ? deviceLabel(d, false) + (d.os || d.ou ? `<div class="muted" style="font-size:12px">${esc([d.os, d.ou].filter(Boolean).join(' · '))}</div>` : '') + (d.description ? `<div class="muted" style="font-size:12px">${esc(d.description)}</div>` : '') : '<span class="flag warn">неизвестно</span>'}</td>` : ''}</tr>`; }).join('')}
-    </tbody></table>${macs.length > MAX ? `<div class="muted" style="margin-top:6px">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`
-    : '<div class="muted">Нет выученных MAC-адресов.</div>'}`;
+  if (!macs.length) return '<div class="sub">Устройства</div><div class="muted">Нет выученных MAC-адресов.</div>';
+  const withDev = DIR || (PHONES && PHONES.size);
+  return `<div class="sub">Устройства (${macs.length})</div>
+    <table class="tbl static"><thead><tr><th>MAC</th><th>VLAN</th><th>IP</th>${withDev ? '<th>Устройство</th>' : ''}</tr></thead><tbody>
+    ${macs.slice(0, MAX).map(m => {
+      const d = deviceInfo(m.mac);
+      const extra = [[d.os, d.ou].filter(Boolean).join(' · '), d.description].filter(Boolean).map(t => `<div class="muted pd-small">${esc(t)}</div>`).join('');
+      const dev = d.name || d.phone ? deviceLabel(d, false) + extra : '<span class="flag warn">неизвестно</span>';
+      return `<tr><td class="mono">${esc(m.mac)}</td><td>${m.vlan ?? '—'}</td><td class="mono">${esc(d.ips.join(', ')) || '<span class="muted">—</span>'}</td>${withDev ? `<td>${dev}</td>` : ''}</tr>`;
+    }).join('')}
+    </tbody></table>${macs.length > MAX ? `<div class="muted pd-note">…и ещё ${macs.length - MAX}. Много MAC — обычно это аплинк или неуправляемый свитч за портом.</div>` : ''}`;
+}
+
+function portConfigHtml(p) {
+  const prof = CFG.profiles.find(g => g.ports.includes(p));
+  const same = prof ? prof.ports.filter(x => x !== p) : [];
+  return `<pre class="pd-config">interface ${esc(p.name)}${p.lines.length ? '\n' + esc(p.lines.map(l => ' ' + l).join('\n')) : '\n <span class="muted"># нет настроек</span>'}</pre>
+    <p class="muted pd-note">${same.length
+      ? `Так же настроены ещё ${same.length} ${plural(same.length, 'порт', 'порта', 'портов')}: <span class="mono">${esc(compressPorts(same))}</span>`
+      : 'Больше ни один порт так не настроен.'}</p>`;
+}
+
+/* ---------- вкладка «Настройка»: шаблон или вручную (PVID, VLAN, телефон) + описание ---------- */
+let PS = null; // { p, cur, allowed: Set, templates, manual, canApply }
+
+// Шаблоны: рабочее место, принтер и точка доступа — из эталона, если он задан (их можно применить),
+// иначе — по самой частой настройке на этом коммутаторе (только команды).
+function portSettingsTemplates() {
+  if (!CFG.profiles) return [];
+  const derived = Fixes.portTemplates(CFG);
+  const out = [];
+  for (const id of Object.keys(Standard.TPL_LABEL)) {
+    const s = STD && STD.ports && STD.ports[id];
+    if (s && s.enabled && s.lines.length) out.push({ id, label: `${Standard.TPL_LABEL[id]} — по эталону`, lines: s.lines, std: true });
+    else {
+      const t = derived.find(x => x.id === id);
+      if (t) out.push(t);
+    }
+  }
+  return out.concat(derived.filter(t => t.special));
+}
+
+function portSettingsHtml(p) {
+  if (typeof Fixes === 'undefined' || CFG.vendor === 'cisco' || CFG.devType === 'huawei-ac') return '';
+  const cur = Fixes.portEditState(p.lines);
+  const manual = p.lines.length > 0 && ['trunk', 'access', 'hybrid'].includes(cur.linkType);
+  const counts = {};
+  for (const x of CFG.ports) if (x.voiceVlan) counts[x.voiceVlan] = (counts[x.voiceVlan] || 0) + 1;
+  const voiceDefault = cur.voice || +Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 200;
+  const sw = SERVER && SWITCHES.find(s => s.id === state.current);
+  const canApply = !!(sw && sw.hasPassword && isHuaweiSwitch(sw));
+  PS = { p, cur, allowed: new Set(cur.allowed), templates: portSettingsTemplates(), manual, canApply };
+
+  return `<div class="port-tool">
+      <label class="field">Как настроить
+        <select id="psTpl"><option value="">${manual ? 'Вручную' : 'Только описание'}</option>${PS.templates.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join('')}</select>
+      </label>
+      <label class="field">Описание
+        <input id="psDesc" value="${esc(p.desc || '')}" placeholder="например, PC-BUH-012 room-305" maxlength="200" autocomplete="off" spellcheck="false">
+      </label>
+      ${manual ? `<div id="psManual" class="port-tool">
+        <label class="field">PVID
+          <input id="psPvid" class="pe-num" type="number" min="1" max="4094" value="${cur.pvid ?? ''}" placeholder="1">
+        </label>
+        ${cur.linkType === 'trunk' ? `<div class="field">VLAN в транке
+          <div id="psVlans" class="pe-vlans"></div>
+          <div class="pe-row"><input id="psVl" aria-label="Номера VLAN, которые добавить или убрать" placeholder="30 или 40-45" autocomplete="off" spellcheck="false">
+            <button class="btn small" type="button" data-pe-add>Добавить</button><button class="btn small" type="button" data-pe-rm>Убрать</button></div>
+        </div>` : ''}
+        <div class="field">Телефон
+          <div class="pe-row">
+            <label class="chk"><input type="checkbox" id="psVoice" ${cur.voice != null ? 'checked' : ''}> Voice VLAN по LLDP-MED</label>
+            <input id="psVoiceVlan" class="pe-num" type="number" min="1" max="4094" value="${voiceDefault}" aria-label="Голосовой VLAN">
+          </div>
+        </div>
+      </div>` : ''}
+      <div id="psOut" class="ps-out"></div>
+      ${canApply ? `<div class="form-actions">
+        <button class="btn primary" type="button" id="psApply" disabled>Применить на коммутаторе</button>
+        <label class="chk"><input type="checkbox" id="psSave" checked> и сохранить (save)</label>
+      </div>` : ''}
+      <div id="psResult" class="pe-result" role="status" tabindex="-1"></div>
+    </div>`;
+}
+
+// «30 40-45 50 to 52» → [30, 40, …, 45, 50, 51, 52]
+function vlanInput(s) {
+  const out = [];
+  for (const m of String(s).replace(/\s+to\s+/gi, '-').matchAll(/(\d+)(?:\s*[-–]\s*(\d+))?/g)) {
+    const a = +m[1], b = m[2] ? +m[2] : a;
+    if (b - a > 4094) continue;
+    for (let v = Math.min(a, b); v <= Math.max(a, b); v++) out.push(v);
+  }
+  return out.filter(v => v >= 1 && v <= 4094);
+}
+
+// Ручные изменения: PVID, VLAN транка, телефон
+function portManualChange() {
+  const { cur, allowed } = PS;
+  const pv = $('#psPvid').value.trim();
+  const change = {
+    add: [...allowed].filter(v => !cur.allowed.includes(v)),
+    remove: cur.allowed.filter(v => !allowed.has(v)),
+  };
+  if (pv !== '' && +pv !== cur.pvid) change.pvid = +pv;
+  const on = $('#psVoice').checked, vv = +$('#psVoiceVlan').value;
+  if (!on && cur.voice != null) change.voice = false;
+  else if (on && vv !== cur.voice) change.voice = vv;
+  return change;
+}
+
+// Что выбрано: шаблон (null — вручную), описание, change для ручного режима, команды режима interface
+function portSettingsChoice() {
+  const { p, templates, manual } = PS;
+  const tpl = templates.find(t => t.id === $('#psTpl').value) || null;
+  const desc = $('#psDesc').value.trim().replace(/\s+/g, ' ');
+  let change = null, cmds = [], err = '';
+  try {
+    if (!tpl) {
+      change = manual ? { ...portManualChange(), desc } : { desc };
+      cmds = Fixes.portEdit(p.lines, change);
+    } else if (tpl.std) cmds = Fixes.templateChange(p, tpl.lines, desc);
+    else cmds = Fixes.portChange(p, tpl, desc);
+  } catch (e) { err = e.message; }
+  return { tpl, desc, change, cmds, err };
+}
+
+// Почему «Применить» нельзя нажать; '' — можно
+function portSettingsBlocker({ tpl, desc, cmds, err }) {
+  const { p } = PS;
+  if (err || !cmds.length) return 'none';
+  if (desc.includes('?')) return 'Символ «?» в описании не поддерживается — в CLI он вызывает подсказку.';
+  if (!tpl) return '';
+  if (tpl.special) return 'Выключение и включение порта выполните вручную.';
+  if (!tpl.std) return 'Применить можно только шаблон из эталона — создайте его на вкладке «Эталон».';
+  if (['uplink', 'link'].includes(p.role)) return 'Магистральный порт — шаблон к нему не применяется.';
+  if (/^Eth-Trunk/.test(p.name) || p.lines.some(l => /^eth-trunk \d+/.test(l))) return 'Порт в Eth-Trunk — шаблон к нему не применяется.';
+  return '';
+}
+
+// Предупреждения: что после изменения может не заработать
+function portSettingsWarnings({ tpl, desc, change }) {
+  const { p, cur, allowed } = PS;
+  const warn = [];
+  if (/[^\x20-\x7e]/.test(desc)) warn.push('Описание не латиницей — многие коммутаторы Huawei его не примут.');
+  if (tpl) {
+    if (tpl.std && p.role === 'trunk') warn.push('На порту много VLAN — возможно, это линк к другому коммутатору.');
+    return warn;
+  }
+  if (!PS.manual) return warn;
+  const voiceNow = $('#psVoice').checked ? +$('#psVoiceVlan').value : null;
+  const used = [change.pvid, ...(change.add || []), typeof change.voice === 'number' ? change.voice : null].filter(v => v != null);
+  const unknown = [...new Set(used)].filter(v => !inRanges(CFG.vlansDeclared, v));
+  if (unknown.length) warn.push(`VLAN ${unknown.join(', ')} не создан на коммутаторе (vlan batch).`);
+  const pvidNow = change.pvid ?? cur.pvid;
+  if (cur.linkType === 'trunk' && pvidNow != null && !allowed.has(pvidNow)) warn.push(`PVID ${pvidNow} не разрешён в транке — ПК и принтер не заработают.`);
+  if (cur.linkType === 'trunk' && voiceNow && !allowed.has(voiceNow)) warn.push(`Голосовой VLAN ${voiceNow} не разрешён в транке — телефон не заработает.`);
+  if (cur.linkType === 'access' && voiceNow) warn.push('Порт access пропускает один VLAN — для ПК и телефона нужен trunk.');
+  return warn;
+}
+
+// Чипы VLAN транка: подряд идущие VLAN одного вида (были / будут добавлены) склеиваются в диапазон
+function portVlansHtml() {
+  const { cur, allowed } = PS;
+  const wasAllowed = new Set(cur.allowed);
+  const ranges = [];
+  for (const v of [...allowed].sort((a, b) => a - b)) {
+    const old = wasAllowed.has(v);
+    const last = ranges[ranges.length - 1];
+    if (last && last.to + 1 === v && last.old === old) last.to = v;
+    else ranges.push({ from: v, to: v, old });
+  }
+  const chip = r => {
+    // Новые VLAN отмечены не только цветом, но и знаком «+»
+    const cls = `vl ${r.old ? '' : 'pe-add'}`;
+    const mark = r.old ? '' : '<span aria-hidden="true">+</span><span class="sr-only">будет добавлен </span>';
+    if (r.from !== r.to) return `<span class="${cls}">${mark}${r.from}–${r.to}</span>`;
+    return `<span class="${cls}">${mark}${r.from}<button type="button" class="pe-x" data-pe-x="${r.from}" title="Убрать VLAN ${r.from}" aria-label="Убрать VLAN ${r.from}">×</button></span>`;
+  };
+  const chips = ranges.map(chip).join('') || '<span class="muted">нет</span>';
+  const removed = cur.allowed.filter(v => !allowed.has(v));
+  if (!removed.length) return chips;
+  const more = removed.length > 40 ? ` <span class="muted">…и ещё ${removed.length - 40}</span>` : '';
+  return chips + `<div class="pe-del-row"><span class="muted">Будут убраны:</span> ${removed.slice(0, 40).map(v => `<span class="vl pe-del">${v}</span>`).join('')}${more}</div>`;
+}
+
+function updatePortSettings() {
+  if (!PS || !$('#psOut')) return;
+  const choice = portSettingsChoice();
+  const { tpl, cmds, err } = choice;
+  if ($('#psManual')) $('#psManual').hidden = !!tpl;
+  if ($('#psVoiceVlan')) $('#psVoiceVlan').disabled = !$('#psVoice').checked;
+  if ($('#psVlans')) $('#psVlans').innerHTML = portVlansHtml();
+
+  const blocker = portSettingsBlocker(choice);
+  if ($('#psApply')) $('#psApply').disabled = !!blocker;
+  let html;
+  if (err) html = `<p class="fix-w">✗ ${esc(err)}</p>`;
+  else if (!cmds.length) html = `<p class="muted ps-empty">${tpl ? 'Порт уже настроен по этому шаблону.' : 'Измените настройки — здесь появятся команды.'}</p>`;
+  else {
+    const warn = portSettingsWarnings(choice);
+    if (PS.canApply && blocker && !warn.includes(blocker)) warn.push(blocker);
+    html = cmdBox(Fixes.sys(Fixes.iface(PS.p.name, cmds))) + warn.map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('') +
+      (PS.canApply && !blocker ? '' : '<p class="fix-n">Выполните команды на коммутаторе вручную и сохраните (save).</p>');
+  }
+  $('#psOut').innerHTML = html;
+}
+
+function portSettingsVlans(add) {
+  const vs = vlanInput($('#psVl').value);
+  if (!vs.length) { toast('Укажите номера VLAN, например 30 или 40-45', 'err'); return; }
+  for (const v of vs) add ? PS.allowed.add(v) : PS.allowed.delete(v);
+  $('#psVl').value = '';
+  updatePortSettings();
+}
+
+function applyPortSettings() {
+  if (!PS) return;
+  const { tpl, desc, change, cmds } = portSettingsChoice();
+  if (tpl) sendPortCommands(PS.p, cmds, 'port-template', { tpl: tpl.id, desc });
+  else sendPortCommands(PS.p, cmds, 'port', change);
+}
+
+/* Выполнить команды порта на коммутаторе (после подтверждения) и показать отчёт.
+   cmds — только для подтверждения: сервер собирает команды сам по body. */
+async function sendPortCommands(p, cmds, action, body) {
+  const sw = SWITCHES.find(s => s.id === state.current);
+  const save = $('#psSave').checked;
+  if (!confirm(`Выполнить на коммутаторе ${sw.name} (${sw.host})?\n\ninterface ${p.name}\n${cmds.map(c => '  ' + c).join('\n')}${save ? '\n\nи сохранить конфигурацию (save)' : ''}`)) return;
+  const btn = $('#psApply');
+  btn.disabled = true; btn.classList.add('spin');
+  $('#psResult').innerHTML = '<p class="muted">Подключаюсь к коммутатору — это займёт до минуты…</p>';
+  let r;
+  try {
+    r = await apiCall('POST', `api/switches/${encodeURIComponent(sw.id)}/${action}`, { port: p.name, seen: p.lines, ...body, save });
+  } catch (e) {
+    r = { ok: false, error: e.message, log: [] };
+  }
+  await loadSwitches().catch(e => toast(e.message, 'err'));
+  selectSwitch(state.current);
+  openPort(p.name); // заново — уже с новой конфигурацией с коммутатора; вкладка «Настройка» остаётся открытой
+  $('#psResult').innerHTML = `<ul class="std-rules">${(r.log || []).map(l => `<li class="${l.ok ? 'ok' : 'bad'}"><span class="mark">${l.ok ? '✓' : '✗'}</span><div class="grow mono pd-small">${esc(l.msg)}</div></li>`).join('')}</ul>` +
+    (r.ok ? `<p class="fix-n pd-done"><b>Готово.</b> ${r.saved ? 'Изменения сохранены.' : 'Изменения <b>не сохранены</b> — после перезагрузки коммутатора пропадут. Выполните <code>save</code>.'}</p>`
+      : `<p class="fix-w">${esc(r.error || 'Ошибка')}${r.applied ? ' Часть команд могла выполниться — проверьте конфигурацию порта.' : ''}</p>`);
+  // Панель порта перерисована — возвращаем фокус к отчёту, чтобы он не терялся
+  $('#psResult').focus();
+  toast(r.ok ? `Порт ${p.name} изменён` : r.error, r.ok ? 'ok' : 'err');
 }
 
 /* ---------- готовые команды (этап 3) ---------- */
@@ -1285,257 +1548,6 @@ function fixHtml(issue, cfg) {
       ${v.warn ? `<p class="fix-w">⚠ ${esc(v.warn)}</p>` : ''}
       ${v.commands ? cmdBox(v.commands) : '<p class="muted">Команды не нужны.</p>'}
     </div>`).join('')}</details>`;
-}
-
-let PORT_TOOL = null; // { p, templates, canApply }
-
-// Шаблоны портов: рабочее место, принтер и точка доступа берутся из эталона, если он задан
-// (такие можно применить на коммутаторе), иначе — самый частый набор настроек на этом коммутаторе.
-function portToolTemplates() {
-  const derived = Fixes.portTemplates(CFG);
-  const out = [];
-  for (const id of Object.keys(Standard.TPL_LABEL)) {
-    const s = STD && STD.ports && STD.ports[id];
-    if (s && s.enabled && s.lines.length) out.push({ id, label: `${Standard.TPL_LABEL[id]} — по эталону`, lines: s.lines, std: true });
-    else {
-      const t = derived.find(x => x.id === id);
-      if (t) out.push(t);
-    }
-  }
-  return out.concat(derived.filter(t => t.special));
-}
-
-function portToolHtml(p) {
-  if (typeof Fixes === 'undefined' || !CFG.profiles || CFG.vendor === 'cisco' || CFG.devType === 'huawei-ac') return '';
-  const templates = portToolTemplates();
-  const sw = SERVER && SWITCHES.find(s => s.id === state.current);
-  const canApply = !!(sw && sw.hasPassword && isHuaweiSwitch(sw));
-  PORT_TOOL = { p, templates, canApply };
-  return `<div class="sub">Команды для порта</div>
-    <div class="port-tool">
-      <label class="field">Сделать порт
-        <select id="tplSelect"><option value="">— только изменить описание —</option>${templates.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join('')}</select>
-      </label>
-      <label class="field">Описание (description)
-        <input id="tplDesc" value="${esc(p.desc || '')}" placeholder="например, PC-BUH-012 room-305" maxlength="200">
-      </label>
-      <div id="tplBasis" class="muted" style="font-size:12px"></div>
-      <div id="tplOut"></div>
-      ${canApply ? `<div class="form-actions" style="margin-top:0">
-        <button class="btn primary" type="button" id="tplApply" disabled>Применить на коммутаторе</button>
-        <label class="chk"><input type="checkbox" id="tplSave" checked> сохранить (save)</label>
-      </div>` : ''}
-      <div id="tplResult"></div>
-    </div>`;
-}
-
-// Что выбрано в блоке шаблонов: шаблон, описание, команды (массив строк режима interface)
-function portToolChoice() {
-  const { p, templates } = PORT_TOOL;
-  const tpl = templates.find(t => t.id === $('#tplSelect').value) || { special: 'none' };
-  const desc = $('#tplDesc').value.trim().replace(/\s+/g, ' ');
-  let cmds;
-  if (tpl.std) cmds = Fixes.templateChange(p, tpl.lines, desc);
-  else if (tpl.special === 'none') cmds = Fixes.portChange(p, { special: 'desc' }, desc);
-  else cmds = Fixes.portChange(p, tpl, desc);
-  return { tpl, desc, cmds };
-}
-
-// Почему кнопку «Применить» нельзя нажать; '' — можно
-function portToolBlocker(p, tpl, desc, cmds) {
-  if (!cmds.length) return 'none';
-  if (desc.includes('?')) return 'Символ «?» в описании не поддерживается — в CLI он вызывает подсказку.';
-  if (tpl.special === 'none') return '';
-  if (tpl.special) return 'Выключение и включение порта здесь не выполняется — скопируйте команды и выполните их вручную.';
-  if (!tpl.std) return 'Применить на коммутаторе можно только шаблон из эталона — создайте эталон на вкладке «Эталон». Пока команды можно скопировать и выполнить вручную.';
-  if (['uplink', 'link'].includes(p.role)) return 'Порт подписан как магистральный — шаблон рабочего места к нему не применяется.';
-  if (/^Eth-Trunk/.test(p.name) || p.lines.some(l => /^eth-trunk \d+/.test(l))) return 'Порт агрегирован (Eth-Trunk) — шаблон к нему не применяется.';
-  return '';
-}
-
-function updatePortTool() {
-  if (!PORT_TOOL || !$('#tplOut')) return;
-  const { p, canApply } = PORT_TOOL;
-  const { tpl, desc, cmds } = portToolChoice();
-  if (tpl.std) $('#tplBasis').textContent = `Шаблон из эталона${STD.updatedAt ? ` от ${fmtTime(STD.updatedAt)}` : ''}. Скорость и дуплекс порта не меняются.`;
-  else $('#tplBasis').textContent = tpl.basis ? `Шаблон: ${tpl.basis} на этом коммутаторе.` : '';
-
-  const blocker = portToolBlocker(p, tpl, desc, cmds);
-  if ($('#tplApply')) $('#tplApply').disabled = !!blocker;
-  if (!cmds.length) {
-    $('#tplOut').innerHTML = '<p class="muted" style="margin:6px 0 0">Порт уже настроен так — команды не нужны.</p>';
-    return;
-  }
-  const warn = [];
-  if (/[^\x20-\x7e]/.test(desc)) warn.push('В описании есть символы не латиницей — многие коммутаторы Huawei их не принимают или показывают неверно. Лучше использовать латиницу.');
-  if (canApply && blocker) warn.push(blocker);
-  else if (tpl.std && p.role === 'trunk') warn.push('На порту разрешено много VLAN — возможно, это линк к другому коммутатору. Проверьте, что к порту подключено конечное устройство.');
-  const note = canApply && !blocker
-    ? '<p class="fix-n">Проверьте команды и нажмите «Применить» — перед выполнением настройки порта будут сверены с коммутатором.</p>'
-    : '<p class="fix-n">Команды только показываются — выполните их на коммутаторе сами, проверьте результат и сохраните командой <code>save</code>.</p>';
-  $('#tplOut').innerHTML = cmdBox(Fixes.sys(Fixes.iface(p.name, cmds))) + warn.map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('') + note;
-}
-
-function applyPortTool() {
-  if (!PORT_TOOL) return;
-  const { tpl, desc, cmds } = portToolChoice();
-  sendPortCommands(PORT_TOOL.p, cmds, 'port-template', { tpl: tpl.std ? tpl.id : '', desc }, 'tpl');
-}
-
-/* ---------- изменение порта: PVID, VLAN транка, телефон ---------- */
-let PE = null; // { p, cur, allowed: Set, voiceDefault }
-function portEditHtml(p) {
-  if (typeof Fixes === 'undefined' || CFG.vendor === 'cisco' || CFG.devType === 'huawei-ac' || !p.lines.length) return '';
-  const cur = Fixes.portEditState(p.lines);
-  if (!['trunk', 'access', 'hybrid'].includes(cur.linkType)) return '';
-  const counts = {};
-  for (const x of CFG.ports) if (x.voiceVlan) counts[x.voiceVlan] = (counts[x.voiceVlan] || 0) + 1;
-  const voiceDefault = cur.voice || +Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 200;
-  PE = { p, cur, allowed: new Set(cur.allowed), voiceDefault };
-  const sw = SERVER && SWITCHES.find(s => s.id === state.current);
-  const canApply = sw && sw.hasPassword && isHuaweiSwitch(sw);
-  return `<div class="sub">Изменить порт</div>
-    <div class="port-tool" id="peBox">
-      <label class="field">PVID (${esc(cur.linkType)})
-        <input id="peP" type="number" min="1" max="4094" value="${cur.pvid ?? ''}" placeholder="не задан — 1">
-      </label>
-      ${cur.linkType === 'trunk' ? `<div class="field">VLAN в транке (allow-pass)
-        <div id="peVlans" class="pe-vlans"></div>
-        <div class="pe-row"><input id="peVl" placeholder="например, 30 или 40-45" autocomplete="off" spellcheck="false">
-          <button class="btn small" type="button" data-pe-add>Добавить</button><button class="btn small" type="button" data-pe-rm>Убрать</button></div>
-      </div>` : ''}
-      <div class="field">Телефон
-        <label class="chk pe-row"><input type="checkbox" id="peVoice" ${cur.voice != null ? 'checked' : ''}> LLDP-MED: сообщать телефону Voice VLAN
-          <input id="peVoiceVlan" type="number" min="1" max="4094" value="${voiceDefault}" style="width:90px"></label>
-      </div>
-      <div id="peOut"></div>
-      ${canApply ? `<div class="form-actions" style="margin-top:0">
-        <button class="btn primary" type="button" id="peApply" disabled>Применить на коммутаторе</button>
-        <label class="chk"><input type="checkbox" id="peSave" checked> сохранить (save)</label>
-      </div>` : ''}
-      <div id="peResult"></div>
-    </div>`;
-}
-
-// «30 40-45 50 to 52» → [30, 40, …, 45, 50, 51, 52]
-function vlanInput(s) {
-  const out = [];
-  for (const m of String(s).replace(/\s+to\s+/gi, '-').matchAll(/(\d+)(?:\s*[-–]\s*(\d+))?/g)) {
-    const a = +m[1], b = m[2] ? +m[2] : a;
-    if (b - a > 4094) continue;
-    for (let v = Math.min(a, b); v <= Math.max(a, b); v++) out.push(v);
-  }
-  return out.filter(v => v >= 1 && v <= 4094);
-}
-
-function portEditChange() {
-  const { cur, allowed } = PE;
-  const pv = $('#peP').value.trim();
-  const change = {
-    add: [...allowed].filter(v => !cur.allowed.includes(v)),
-    remove: cur.allowed.filter(v => !allowed.has(v)),
-  };
-  if (pv !== '' && +pv !== cur.pvid) change.pvid = +pv;
-  const on = $('#peVoice').checked, vv = +$('#peVoiceVlan').value;
-  if (!on && cur.voice != null) change.voice = false;
-  else if (on && vv !== cur.voice) change.voice = vv;
-  return change;
-}
-
-// Чипы VLAN транка: подряд идущие VLAN одного вида (были / будут добавлены) склеиваются в диапазон
-function portEditVlansHtml() {
-  const { cur, allowed } = PE;
-  const wasAllowed = new Set(cur.allowed);
-  const ranges = [];
-  for (const v of [...allowed].sort((a, b) => a - b)) {
-    const old = wasAllowed.has(v);
-    const last = ranges[ranges.length - 1];
-    if (last && last.to + 1 === v && last.old === old) last.to = v;
-    else ranges.push({ from: v, to: v, old });
-  }
-  const chip = r => {
-    const cls = `vl ${r.old ? '' : 'pe-add'}`;
-    if (r.from !== r.to) return `<span class="${cls}">${r.from}–${r.to}</span>`;
-    return `<span class="${cls}" title="${r.old ? '' : 'будет добавлен'}">${r.from}<button type="button" class="pe-x" data-pe-x="${r.from}" title="Убрать VLAN ${r.from}">×</button></span>`;
-  };
-  const chips = ranges.map(chip).join('') || '<span class="muted">нет</span>';
-
-  const removed = cur.allowed.filter(v => !allowed.has(v));
-  if (!removed.length) return chips;
-  const more = removed.length > 40 ? ` <span class="muted">…и ещё ${removed.length - 40}</span>` : '';
-  return chips + `<div class="pe-del-row"><span class="muted">Будут убраны:</span> ${removed.slice(0, 40).map(v => `<span class="vl pe-del">${v}</span>`).join('')}${more}</div>`;
-}
-
-// Предупреждения о том, что после изменения трафик может не пойти
-function portEditWarnings(change) {
-  const { cur, allowed } = PE;
-  const warn = [];
-  const vlansUsed = [change.pvid, ...(change.add || []), typeof change.voice === 'number' ? change.voice : null].filter(v => v != null);
-  const unknown = [...new Set(vlansUsed)].filter(v => !inRanges(CFG.vlansDeclared, v));
-  if (unknown.length) warn.push(`VLAN ${unknown.join(', ')} не создан на коммутаторе (vlan batch). Трафик в нём не пойдёт, пока VLAN не создан.`);
-  const pvidNow = change.pvid ?? cur.pvid;
-  if (cur.linkType === 'trunk' && pvidNow != null && !allowed.has(pvidNow)) warn.push(`PVID ${pvidNow} не входит в список VLAN транка — нетегированный трафик (ПК, принтер) не пройдёт. Добавьте VLAN ${pvidNow}.`);
-  const voiceNow = $('#peVoice').checked ? +$('#peVoiceVlan').value : null;
-  if (cur.linkType === 'trunk' && voiceNow && !allowed.has(voiceNow)) warn.push(`Голосовой VLAN ${voiceNow} не разрешён в транке — телефон получит VLAN, но его трафик не пройдёт. Добавьте VLAN ${voiceNow}.`);
-  if (cur.linkType === 'access' && voiceNow) warn.push('Порт в режиме access пропускает только один VLAN — для ПК и телефона на одном порту нужен trunk.');
-  return warn;
-}
-
-function updatePortEdit() {
-  if (!PE || !$('#peBox')) return;
-  const { p } = PE;
-  $('#peVoiceVlan').disabled = !$('#peVoice').checked;
-  if ($('#peVlans')) $('#peVlans').innerHTML = portEditVlansHtml();
-
-  let cmds = [], err = '';
-  const change = portEditChange();
-  try { cmds = Fixes.portEdit(p.lines, change); } catch (e) { err = e.message; }
-
-  let out;
-  if (err) out = `<p class="fix-w">✗ ${esc(err)}</p>`;
-  else if (cmds.length) out = cmdBox(Fixes.sys(Fixes.iface(p.name, cmds))) + portEditWarnings(change).map(w => `<p class="fix-w">⚠ ${esc(w)}</p>`).join('');
-  else out = '<p class="muted" style="margin:0">Измените PVID, VLAN или настройку телефона — здесь появятся команды.</p>';
-  $('#peOut').innerHTML = out;
-  if ($('#peApply')) $('#peApply').disabled = !!err || !cmds.length;
-}
-
-function portEditVlans(add) {
-  const vs = vlanInput($('#peVl').value);
-  if (!vs.length) { toast('Укажите номера VLAN, например 30 или 40-45', 'err'); return; }
-  for (const v of vs) add ? PE.allowed.add(v) : PE.allowed.delete(v);
-  $('#peVl').value = '';
-  updatePortEdit();
-}
-
-function applyPortEdit() {
-  if (!PE) return;
-  const change = portEditChange();
-  sendPortCommands(PE.p, Fixes.portEdit(PE.p.lines, change), 'port', change, 'pe');
-}
-
-/* Выполнить команды порта на коммутаторе (после подтверждения) и показать результат.
-   cmds — только для подтверждения: сервер собирает команды сам по body.
-   ids — префикс элементов блока: #<ids>Apply, #<ids>Save, #<ids>Result. */
-async function sendPortCommands(p, cmds, action, body, ids) {
-  const sw = SWITCHES.find(s => s.id === state.current);
-  const save = $(`#${ids}Save`).checked;
-  if (!confirm(`Выполнить на коммутаторе ${sw.name} (${sw.host})?\n\ninterface ${p.name}\n${cmds.map(c => '  ' + c).join('\n')}${save ? '\n\nи сохранить конфигурацию (save)' : ''}`)) return;
-  const btn = $(`#${ids}Apply`);
-  btn.disabled = true; btn.classList.add('spin');
-  $(`#${ids}Result`).innerHTML = '<p class="muted">Подключаюсь к коммутатору — это займёт до минуты…</p>';
-  let r;
-  try {
-    r = await apiCall('POST', `api/switches/${encodeURIComponent(sw.id)}/${action}`, { port: p.name, seen: p.lines, ...body, save });
-  } catch (e) {
-    r = { ok: false, error: e.message, log: [] };
-  }
-  await loadSwitches().catch(e => toast(e.message, 'err'));
-  selectSwitch(state.current);
-  openPort(p.name); // заново — уже с новой конфигурацией с коммутатора
-  $(`#${ids}Result`).innerHTML = `<ul class="std-rules">${(r.log || []).map(l => `<li class="${l.ok ? 'ok' : 'bad'}"><span class="mark">${l.ok ? '✓' : '✗'}</span><div class="grow mono" style="font-size:12.5px">${esc(l.msg)}</div></li>`).join('')}</ul>` +
-    (r.ok ? `<p class="fix-n" style="color:var(--text)"><b>Готово.</b> ${r.saved ? 'Изменения сохранены.' : 'Изменения <b>не сохранены</b> — после перезагрузки коммутатора пропадут. Выполните <code>save</code>.'}</p>`
-      : `<p class="fix-w">${esc(r.error || 'Ошибка')}${r.applied ? ' Часть команд могла выполниться — проверьте конфигурацию порта выше.' : ''}</p>`);
-  toast(r.ok ? `Порт ${p.name} изменён` : r.error, r.ok ? 'ok' : 'err');
 }
 
 async function copyText(text) {
@@ -1955,14 +1967,14 @@ function portHistoryHtml(swId, portName) {
   }
   if (!rows.length) return '';
   rows.sort((a, b) => String(b.to).localeCompare(String(a.to)));
-  return `<div class="sub">История порта</div>
+  return `<details class="pd-more"><summary>История порта (${rows.length})</summary>
     <table class="tbl static"><thead><tr><th>Устройство</th><th>Был на порту</th></tr></thead><tbody>
     ${rows.slice(0, 20).map(r => {
       const info = deviceInfo(r.mac);
       return `<tr><td>${info.name ? deviceLabel(info, false) + ` <span class="mono muted">${esc(r.mac)}</span>` : `<span class="mono">${esc(r.mac)}</span>`}</td>
         <td>${esc(fmtTime(r.from))} — ${r.current ? `последний раз ${esc(fmtTime(r.to))}` : `${esc(fmtTime(r.to))} <span class="muted">(переехал)</span>`}</td></tr>`;
     }).join('')}
-    </tbody></table>`;
+    </tbody></table></details>`;
 }
 
 async function renderHistory(sw) {
@@ -3140,28 +3152,38 @@ function bind() {
   $('#staFilter').addEventListener('change', () => { if (CFG && CFG.state && CFG.state.wlan) renderWifiClients(CFG); });
 
   $('#drawerBody').addEventListener('change', e => {
-    if (e.target.id === 'tplSelect') updatePortTool();
-    if (e.target.id === 'peVoice') {
+    if (e.target.id === 'psTpl') updatePortSettings();
+    if (e.target.id === 'psVoice') {
       // Включили телефон на транке — сразу разрешаем голосовой VLAN
-      const v = +$('#peVoiceVlan').value;
-      if (e.target.checked && PE && PE.cur.linkType === 'trunk' && v >= 1 && v <= 4094) PE.allowed.add(v);
-      updatePortEdit();
+      const v = +$('#psVoiceVlan').value;
+      if (e.target.checked && PS && PS.cur.linkType === 'trunk' && v >= 1 && v <= 4094) PS.allowed.add(v);
+      updatePortSettings();
     }
   });
   $('#drawerBody').addEventListener('submit', e => { if (e.target.id === 'stdForm') { e.preventDefault(); saveStdForm(); } });
   $('#drawerBody').addEventListener('input', e => {
-    if (e.target.id === 'tplDesc') updatePortTool();
-    if (['peP', 'peVoiceVlan'].includes(e.target.id)) updatePortEdit();
+    if (['psDesc', 'psPvid', 'psVoiceVlan'].includes(e.target.id)) updatePortSettings();
   });
-  $('#drawerBody').addEventListener('keydown', e => { if (e.target.id === 'peVl' && e.key === 'Enter') { e.preventDefault(); portEditVlans(true); } });
+  $('#drawerBody').addEventListener('keydown', e => {
+    if (e.target.id === 'psVl' && e.key === 'Enter') { e.preventDefault(); portSettingsVlans(true); return; }
+    // Вкладки панели порта: стрелки влево/вправо, Home/End
+    const tab = e.target.closest('[data-pd-tab]');
+    if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const ids = $$('[data-pd-tab]').map(b => b.dataset.pdTab);
+    const i = ids.indexOf(tab.dataset.pdTab);
+    const next = { ArrowLeft: i - 1, ArrowRight: i + 1, Home: 0, End: ids.length - 1 }[e.key];
+    showPortTab(ids[(next + ids.length) % ids.length], true);
+  });
   $('#drawerBody').addEventListener('click', e => {
-    if (e.target.closest('[data-pe-add]')) portEditVlans(true);
-    else if (e.target.closest('[data-pe-rm]')) portEditVlans(false);
-    else if (e.target.closest('#peApply')) applyPortEdit();
-    else if (e.target.closest('#tplApply')) applyPortTool();
+    const tab = e.target.closest('[data-pd-tab]');
+    if (tab) { showPortTab(tab.dataset.pdTab); return; }
+    if (e.target.closest('[data-pe-add]')) portSettingsVlans(true);
+    else if (e.target.closest('[data-pe-rm]')) portSettingsVlans(false);
+    else if (e.target.closest('#psApply')) applyPortSettings();
     else {
       const x = e.target.closest('[data-pe-x]');
-      if (x) { PE.allowed.delete(+x.dataset.peX); updatePortEdit(); }
+      if (x) { PS.allowed.delete(+x.dataset.peX); updatePortSettings(); }
     }
   });
 

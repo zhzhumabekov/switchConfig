@@ -264,23 +264,26 @@
       pvid   — новый PVID (undefined — не менять)
       add    — VLAN, которые добавить в транк; remove — убрать из транка
       voice  — VLAN телефона для LLDP-MED, false — выключить, undefined — не менять
+      desc   — новое описание ('' — убрать, undefined — не менять)
     Возвращает команды для режима interface. Ошибка — исключение с понятным текстом. */
   const VOICE_RE = /^lldp tlv-enable med-tlv network-policy voice-vlan vlan (\d+)/;
   const okVlan = v => Number.isInteger(v) && v >= 1 && v <= 4094;
 
   function portEditState(lines) {
     const m = modelOf(lines);
-    let r, voice = null;
+    let r, voice = null, desc = '';
     for (const l of lines) {
       if ((r = l.match(/^port hybrid pvid vlan (\d+)/))) m.pvid = +r[1];
       if ((r = l.match(VOICE_RE))) voice = +r[1];
+      if ((r = l.match(/^description (.+)/))) desc = r[1];
     }
-    return { linkType: m.linkType, pvid: m.pvid, allowed: m.allowed, voice };
+    return { linkType: m.linkType, pvid: m.pvid, allowed: m.allowed, voice, desc };
   }
 
   function portEdit(lines, change) {
     const c = portEditState(lines);
     const out = [];
+    if (change.desc !== undefined && change.desc !== c.desc) out.push(change.desc ? `description ${change.desc}` : 'undo description');
     const add = [...new Set(change.add || [])], remove = [...new Set(change.remove || [])];
     for (const v of [...add, ...remove]) if (!okVlan(v)) throw new Error(`Некорректный VLAN: ${v}`);
 

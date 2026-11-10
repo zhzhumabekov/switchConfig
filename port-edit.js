@@ -44,6 +44,8 @@ function parseChange(b) {
   if (b.pvid !== undefined && b.pvid !== null) change.pvid = Number(b.pvid);
   if (b.voice === false) change.voice = false;
   else if (b.voice !== undefined && b.voice !== null) change.voice = Number(b.voice);
+  const desc = parseDesc(b.desc);
+  if (desc !== undefined) change.desc = desc;
   return change;
 }
 
