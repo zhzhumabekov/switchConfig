@@ -11,7 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const DATA = path.join(__dirname, 'data');
+const { DATA } = require('./paths');
 const CONFIGS = path.join(DATA, 'configs');
 const STATES = path.join(DATA, 'state');
 const LIST = path.join(DATA, 'switches.json');

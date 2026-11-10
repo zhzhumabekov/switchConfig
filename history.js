@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const LineDiff = require('./diff');
 
-const ROOT = path.join(__dirname, 'data', 'history');
+const ROOT = path.join(require('./paths').DATA, 'history');
 const EVENTS = path.join(ROOT, 'events.jsonl');
 const DEVICES = path.join(ROOT, 'devices.json');
 const MAX_VERSIONS = 300;

@@ -15,8 +15,7 @@ const scheduler = require('./scheduler');
 const backup = require('./backup');
 const { redact } = require('./update-config');
 
-const STANDARD = path.join(__dirname, 'data', 'standard.json');
-const PORT = +process.env.PORT || 8080;
+const STANDARD = path.join(require('./paths').DATA, 'standard.json');
 const HOST = '127.0.0.1';
 
 // Отдаём только эти файлы — конфиги с секретами и data/ наружу не попадают
@@ -253,7 +252,7 @@ async function api(req, res, parts) {
 }
 
 /* ---------- сервер ---------- */
-const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+let allowedHosts = new Set();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -282,17 +281,33 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.on('error', err => {
-  if (err.code === 'EADDRINUSE') console.error(`Порт ${PORT} занят. Возможно, сервер уже запущен — откройте http://${HOST}:${PORT}/`);
-  else console.error(err);
-  process.exit(1);
-});
+// Запуск сервера. Обещание выполняется, когда порт открыт; ошибку (например, порт занят) отдаёт вызывающему
+const DEFAULT_PORT = +process.env.PORT || 8080;
 
-server.listen(PORT, HOST, () => {
-  console.log(`Сервер запущен: http://${HOST}:${PORT}/`);
-  console.log(`Настройки коммутаторов: http://${HOST}:${PORT}/settings.html`);
-  console.log('Ctrl+C — остановить.');
-  scheduler.start();
-  const sc = scheduler.load();
-  console.log(sc.enabled ? `Сбор по расписанию: состояние портов каждые ${sc.stateMinutes} мин, конфигурация раз в ${sc.configHours} ч.` : 'Сбор по расписанию выключен.');
-});
+function start(port = DEFAULT_PORT) {
+  return new Promise((resolve, reject) => {
+    allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+    server.once('error', reject);
+    server.listen(port, HOST, () => {
+      server.off('error', reject);
+      scheduler.start();
+      resolve(`http://${HOST}:${port}/`);
+    });
+  });
+}
+
+module.exports = { start };
+
+if (require.main === module) {
+  start().then(url => {
+    console.log(`Сервер запущен: ${url}`);
+    console.log(`Настройки коммутаторов: ${url}settings.html`);
+    console.log('Ctrl+C — остановить.');
+    const sc = scheduler.load();
+    console.log(sc.enabled ? `Сбор по расписанию: состояние портов каждые ${sc.stateMinutes} мин, конфигурация раз в ${sc.configHours} ч.` : 'Сбор по расписанию выключен.');
+  }, err => {
+    if (err.code === 'EADDRINUSE') console.error(`Порт ${DEFAULT_PORT} занят. Возможно, сервер уже запущен — откройте http://${HOST}:${DEFAULT_PORT}/`);
+    else console.error(err);
+    process.exit(1);
+  });
+}

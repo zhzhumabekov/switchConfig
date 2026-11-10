@@ -6,10 +6,10 @@ const dns = require('dns').promises;
 const { execFile } = require('child_process');
 const store = require('./store');
 
-const DATA = path.join(__dirname, 'data');
+const { DATA, unpacked } = require('./paths');
 const SETTINGS = path.join(DATA, 'directory-settings.json');
 const RESULT = path.join(DATA, 'directory.json');
-const SCRIPT = path.join(__dirname, 'directory.ps1');
+const SCRIPT = unpacked('directory.ps1');
 
 const DEFAULTS = { enabled: process.platform === 'win32', dhcpServers: '', ad: true, dhcp: true, dns: true, user: '', secret: null };
 

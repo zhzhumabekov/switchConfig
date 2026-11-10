@@ -5,7 +5,7 @@ const store = require('./store');
 const collector = require('./collector');
 const directory = require('./directory');
 
-const FILE = path.join(__dirname, 'data', 'schedule.json');
+const FILE = path.join(require('./paths').DATA, 'schedule.json');
 const DEFAULTS = { enabled: true, stateMinutes: 30, configHours: 24, directoryMinutes: 60 };
 const LIMITS = { stateMinutes: [5, 1440], configHours: [1, 168], directoryMinutes: [10, 1440] };
 
