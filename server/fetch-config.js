@@ -1,7 +1,7 @@
 // Подключается к коммутатору Huawei по SSH, забирает текущую конфигурацию,
 // сохраняет её в 3floor.txt и пересобирает config.js для страницы.
 //
-//   node fetch-config.js --host 192.168.1.1 --user admin [--port 22] [--out 3floor.txt]
+//   node server/fetch-config.js --host 192.168.1.1 --user admin [--port 22] [--out 3floor.txt]
 //
 // Адрес и логин можно задать переменными окружения SWITCH_HOST и SWITCH_USER.
 //
@@ -231,11 +231,11 @@ function extract(text) {
 async function main() {
   const opt = parseArgs(process.argv.slice(2));
   if (opt.help) {
-    console.log('node fetch-config.js [--host IP] [--port 22] [--user имя] [--out файл.txt] [--timeout сек]');
+    console.log('node server/fetch-config.js [--host IP] [--port 22] [--user имя] [--out файл.txt] [--timeout сек]');
     return;
   }
   if (!opt.host || !opt.user) throw new Error('Укажите адрес и логин: --host IP --user имя (или SWITCH_HOST / SWITCH_USER)');
-  const out = path.resolve(__dirname, opt.out);
+  const out = path.resolve(require('./paths').ROOT, opt.out);
   const password = process.env.SWITCH_PASSWORD || await askHidden(`Пароль для ${opt.user}@${opt.host}: `);
 
   console.log(`Подключаюсь к ${opt.host}:${opt.port}…`);

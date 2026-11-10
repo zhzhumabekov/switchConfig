@@ -4,10 +4,10 @@
   "description": "Просмотр конфигураций коммутаторов Huawei и Cisco",
   "main": "electron/main.js",
   "scripts": {
-    "fetch": "node fetch-config.js",
-    "update": "node update-config.js",
-    "watch": "node update-config.js --watch",
-    "start": "node server.js",
+    "fetch": "node server/fetch-config.js",
+    "update": "node server/update-config.js",
+    "watch": "node server/update-config.js --watch",
+    "start": "node server/server.js",
     "app": "electron .",
     "dist": "electron-builder --win",
     "icon": "node build/make-icon.js"
@@ -31,18 +31,16 @@
       "output": "dist"
     },
     "files": [
-      "*.js",
-      "!config.js",
-      "index.html",
-      "settings.html",
-      "style.css",
-      "directory.ps1",
+      "public/**",
+      "!public/config.js",
+      "shared/**",
+      "server/**",
       "electron/**",
       "package.json",
       "build/icon.png"
     ],
     "asarUnpack": [
-      "directory.ps1"
+      "server/directory.ps1"
     ],
     "win": {
       "target": [

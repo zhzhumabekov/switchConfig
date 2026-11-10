@@ -16,13 +16,16 @@ const backup = require('./backup');
 const portEdit = require('./port-edit');
 const { redact } = require('./update-config');
 
-const STANDARD = path.join(require('./paths').DATA, 'standard.json');
+const { ROOT, DATA } = require('./paths');
+const STANDARD = path.join(DATA, 'standard.json');
 const HOST = '127.0.0.1';
 
 // Отдаём только эти файлы — конфиги с секретами и data/ наружу не попадают
 const STATIC = {
-  '/': 'index.html', '/index.html': 'index.html', '/settings.html': 'settings.html',
-  '/style.css': 'style.css', '/app.js': 'app.js', '/settings.js': 'settings.js', '/config.js': 'config.js', '/diff.js': 'diff.js', '/fixes.js': 'fixes.js', '/standard.js': 'standard.js', '/cme-cmd.js': 'cme-cmd.js',
+  '/': 'public/index.html', '/index.html': 'public/index.html', '/settings.html': 'public/settings.html',
+  '/style.css': 'public/style.css', '/app.js': 'public/app.js', '/settings.js': 'public/settings.js', '/config.js': 'public/config.js',
+  // Общие модули страница подключает как ../shared/… — так же они находятся и при открытии index.html двойным кликом
+  '/shared/diff.js': 'shared/diff.js', '/shared/fixes.js': 'shared/fixes.js', '/shared/standard.js': 'shared/standard.js', '/shared/cme-cmd.js': 'shared/cme-cmd.js',
 };
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
@@ -279,7 +282,7 @@ const server = http.createServer(async (req, res) => {
 
     const file = STATIC[url.pathname];
     if (!file || req.method !== 'GET') throw new HttpError(404, 'Не найдено');
-    const full = path.join(__dirname, file);
+    const full = path.join(ROOT, file);
     if (!fs.existsSync(full)) throw new HttpError(404, 'Не найдено');
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)], 'Cache-Control': 'no-cache' });
     fs.createReadStream(full).pipe(res);

@@ -1,14 +1,15 @@
 // Пересобирает config.js из 3floor.txt (секреты скрываются).
-//   node update-config.js            — обновить один раз
-//   node update-config.js --watch    — следить за файлом и обновлять при каждом сохранении
-//   node update-config.js other.txt  — взять другой файл конфига
+//   node server/update-config.js            — обновить один раз
+//   node server/update-config.js --watch    — следить за файлом и обновлять при каждом сохранении
+//   node server/update-config.js other.txt  — взять другой файл конфига
 const fs = require('fs');
 const path = require('path');
 
 const args = process.argv.slice(2);
 const watch = args.includes('--watch') || args.includes('-w');
-const defaultSrc = path.resolve(__dirname, args.find(a => !a.startsWith('-')) || '3floor.txt');
-const out = path.join(__dirname, 'config.js');
+const { ROOT } = require('./paths');
+const defaultSrc = path.resolve(ROOT, args.find(a => !a.startsWith('-')) || '3floor.txt');
+const out = path.join(ROOT, 'public', 'config.js');
 
 function redact(text) {
   return text

@@ -1,12 +1,12 @@
 // Сбор данных с коммутаторов: конфигурация и/или состояние портов за одно SSH-подключение,
 // запись истории и событий. Используется кнопками «Обновить» и расписанием.
 const store = require('./store');
-const live = require('./live-state');
+const live = require('./parse/live-state');
 const history = require('./history');
 const directory = require('./directory');
-const cme = require('./cme');
-const wlan = require('./wlan');
-const ciscoState = require('./cisco-state');
+const cme = require('./parse/cme');
+const wlan = require('./parse/wlan');
+const ciscoState = require('./parse/cisco-state');
 const { runCommands, extract, humanError } = require('./fetch-config');
 
 const busy = new Set(); // id коммутаторов, с которых сейчас забираются данные

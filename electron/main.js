@@ -60,7 +60,7 @@ app.on('second-instance', () => {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   try {
-    baseUrl = await require('../server').start(PORT);
+    baseUrl = await require('../server/server').start(PORT);
   } catch (err) {
     dialog.showErrorBox('Не удалось запустить',
       err.code === 'EADDRINUSE'

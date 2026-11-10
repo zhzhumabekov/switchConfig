@@ -11,7 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-const { DATA } = require('./paths');
+const { DATA, ROOT } = require('./paths');
 const CONFIGS = path.join(DATA, 'configs');
 const STATES = path.join(DATA, 'state');
 const LIST = path.join(DATA, 'switches.json');
@@ -72,7 +72,7 @@ function save(list) {
 // При первом запуске переносим уже имеющийся 3floor.txt, чтобы страница не была пустой
 function seed() {
   const list = [];
-  const old = path.join(__dirname, '3floor.txt');
+  const old = path.join(ROOT, '3floor.txt');
   if (fs.existsSync(old)) {
     const text = fs.readFileSync(old, 'utf8').replace(/\r/g, '');
     const sysname = (text.match(/^ ?sysname\s+(\S+)/m) || [])[1] || '';

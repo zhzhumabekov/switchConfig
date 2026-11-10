@@ -5,7 +5,7 @@
 //   data/history/devices.json             — MAC → где виден сейчас, когда появился, куда переезжал
 const fs = require('fs');
 const path = require('path');
-const LineDiff = require('./diff');
+const LineDiff = require('../shared/diff');
 
 const ROOT = path.join(require('./paths').DATA, 'history');
 const EVENTS = path.join(ROOT, 'events.jsonl');

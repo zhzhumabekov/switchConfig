@@ -8,5 +8,5 @@ if not exist node_modules\ssh2 (
   call npm install --no-fund --no-audit
 )
 start "" http://127.0.0.1:8080/
-node server.js
+node server\server.js
 pause
