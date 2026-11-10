@@ -81,6 +81,8 @@ const PROMPT = VENDORS.huawei.prompt;
 // Выполняет команды в одной SSH-сессии и возвращает их вывод (по элементу на команду).
 // opt.testOnly — только войти и вернуть имя из приглашения (<SWITCH-NAME>), без команд.
 // opt.vendor — 'huawei' (по умолчанию) или 'cisco'; opt.enablePassword — пароль enable для Cisco.
+// opt.configMode — команды меняют режим (system-view, interface …), поэтому концом вывода считается
+// любое приглашение этого же устройства: <NAME>, [NAME], [NAME-GigabitEthernet0/0/1].
 function runCommands(opt, password, commands) {
   const timeout = opt.timeout || 60;
   const V = VENDORS[opt.vendor] || VENDORS.huawei;
@@ -101,6 +103,11 @@ function runCommands(opt, password, commands) {
       setTimeout(() => conn.end(), 300);
     };
     const timer = setTimeout(() => finish(new Error(`Таймаут ${timeout} с — коммутатор не ответил`)), timeout * 1000);
+    const atPrompt = text => {
+      if (!opt.configMode) return text.replace(/\s+$/, '').endsWith(prompt);
+      const m = text.match(V.prompt);
+      return !!m && V.name(m[1]).startsWith(V.name(prompt));
+    };
 
     conn.on('ready', () => {
       conn.shell({ term: 'vt100', cols: 512, rows: 200 }, (err, stream) => {
@@ -141,7 +148,7 @@ function runCommands(opt, password, commands) {
             if (opt.vendor === 'cisco' && prompt.endsWith('>') && opt.enablePassword) {
               enabling = true; buf = ''; send('enable'); return;
             }
-          } else if (!clean(buf).replace(/\s+$/, '').endsWith(prompt)) {
+          } else if (!atPrompt(clean(buf))) {
             return; // команда ещё выводит данные
           } else if (idx >= 1) {
             outputs[idx - 1] = clean(buf); // idx 0 — screen-length, его вывод не нужен

@@ -6,7 +6,6 @@
 
   // Роль порта → шаблон эталона
   const ROLE_TPL = { access: 'workstation', printer: 'printer', ap: 'ap' };
-  const PHYS = /^(undo )?(negotiation auto|speed \S+|duplex \S+)$/;
   const TPL_LABEL = { workstation: 'Рабочее место (ПК + телефон)', printer: 'Принтер / устройство без телефона', ap: 'Точка доступа Wi‑Fi' };
 
   const loghosts = cfg => cfg.log.map(l => (l.match(/loghost\s+(\S+)/) || [])[1]).filter(Boolean);
@@ -146,8 +145,7 @@
       const t = tplId && std && std.ports && std.ports[tplId];
       if (!t || !t.enabled || !t.lines.length || p.shutdown || !p.lines.length) continue;
       portsChecked++;
-      // Скорость, дуплекс и автосогласование — свойства конкретного устройства, с эталоном не сравниваются
-      const change = Fixes.portChange(p, { lines: t.lines }).filter(l => !PHYS.test(l));
+      const change = Fixes.templateChange(p, t.lines);
       if (!change.length) continue;
       const key = tplId + '|' + change.join('|');
       if (!groups.has(key)) groups.set(key, { tpl: tplId, label: TPL_LABEL[tplId], change, ports: [] });

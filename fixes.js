@@ -1,5 +1,6 @@
 // Готовые команды Huawei VRP для исправления замечаний и шаблоны настройки портов.
-// Команды только формируются для копирования — на коммутатор ничего не отправляется.
+// Здесь команды только формируются. На коммутатор их отправляет port-edit.js — и только
+// изменения порта (portEdit), по кнопке «Применить».
 (function (root) {
   'use strict';
 
@@ -247,12 +248,64 @@
     return out;
   }
 
+  // Скорость, дуплекс и автосогласование — свойства конкретного устройства, шаблоном эталона не меняются
+  const PHYS = /^(undo )?(negotiation auto|speed \S+|duplex \S+)$/;
+  function templateChange(p, tplLines, desc) {
+    return portChange(p, { lines: tplLines }, desc).filter(l => !PHYS.test(l));
+  }
+
   function portCommands(p, tpl, desc) {
     const lines = portChange(p, tpl, desc);
     return lines.length ? sys(iface(p.name, lines)) : '';
   }
 
-  const api = { forIssue, portTemplates, portChange, portCommands, vrpList, undoOf, modelOf, sys, iface };
+  /* ---------- ручное изменение порта: PVID, VLAN транка, телефон ----------
+    lines — текущие строки interface; change:
+      pvid   — новый PVID (undefined — не менять)
+      add    — VLAN, которые добавить в транк; remove — убрать из транка
+      voice  — VLAN телефона для LLDP-MED, false — выключить, undefined — не менять
+    Возвращает команды для режима interface. Ошибка — исключение с понятным текстом. */
+  const VOICE_RE = /^lldp tlv-enable med-tlv network-policy voice-vlan vlan (\d+)/;
+  const okVlan = v => Number.isInteger(v) && v >= 1 && v <= 4094;
+
+  function portEditState(lines) {
+    const m = modelOf(lines);
+    let r, voice = null;
+    for (const l of lines) {
+      if ((r = l.match(/^port hybrid pvid vlan (\d+)/))) m.pvid = +r[1];
+      if ((r = l.match(VOICE_RE))) voice = +r[1];
+    }
+    return { linkType: m.linkType, pvid: m.pvid, allowed: m.allowed, voice };
+  }
+
+  function portEdit(lines, change) {
+    const c = portEditState(lines);
+    const out = [];
+    const add = [...new Set(change.add || [])], remove = [...new Set(change.remove || [])];
+    for (const v of [...add, ...remove]) if (!okVlan(v)) throw new Error(`Некорректный VLAN: ${v}`);
+
+    if (change.pvid !== undefined && change.pvid !== c.pvid) {
+      if (!okVlan(change.pvid)) throw new Error(`Некорректный PVID: ${change.pvid}`);
+      const cmd = { trunk: 'port trunk pvid vlan', access: 'port default vlan', hybrid: 'port hybrid pvid vlan' }[c.linkType];
+      if (!cmd) throw new Error('У порта не задан port link-type — PVID здесь не меняется');
+      out.push(`${cmd} ${change.pvid}`);
+    }
+    if (add.length || remove.length) {
+      if (c.linkType !== 'trunk') throw new Error('Список VLAN меняется только у порта в режиме trunk');
+      const rm = remove.filter(v => c.allowed.includes(v));
+      const ad = add.filter(v => !c.allowed.includes(v) && !remove.includes(v));
+      if (rm.length) out.push(`undo port trunk allow-pass vlan ${vrpList(rm)}`);
+      if (ad.length) out.push(`port trunk allow-pass vlan ${vrpList(ad)}`);
+    }
+    if (change.voice === false && c.voice != null) out.push('undo lldp tlv-enable med-tlv network-policy');
+    else if (change.voice !== undefined && change.voice !== false && change.voice !== c.voice) {
+      if (!okVlan(change.voice)) throw new Error(`Некорректный VLAN телефона: ${change.voice}`);
+      out.push(`lldp tlv-enable med-tlv network-policy voice-vlan vlan ${change.voice}`);
+    }
+    return out;
+  }
+
+  const api = { forIssue, portTemplates, portChange, templateChange, portCommands, portEdit, portEditState, vrpList, undoOf, modelOf, sys, iface };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.Fixes = api;
 })(typeof window !== 'undefined' ? window : globalThis);

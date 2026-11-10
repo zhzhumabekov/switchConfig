@@ -13,6 +13,7 @@ const collector = require('./collector');
 const history = require('./history');
 const scheduler = require('./scheduler');
 const backup = require('./backup');
+const portEdit = require('./port-edit');
 const { redact } = require('./update-config');
 
 const STANDARD = path.join(require('./paths').DATA, 'standard.json');
@@ -171,6 +172,13 @@ async function api(req, res, parts) {
     const b = await readBody(req);
     if (parts[4] === 'undo') return send(res, 200, await backup.undoRestore(id));
     return send(res, 200, await backup.restore(id, String(b.ts || ''), b.confirm));
+  }
+
+  if (res1 === 'switches' && id && action === 'port' && method === 'POST') {
+    return send(res, 200, await portEdit.applyPortEdit(id, await readBody(req)));
+  }
+  if (res1 === 'switches' && id && action === 'port-template' && method === 'POST') {
+    return send(res, 200, await portEdit.applyPortTemplate(id, await readBody(req)));
   }
 
   if (res1 === 'events' && method === 'GET') {

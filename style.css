@@ -435,6 +435,16 @@ a.btn { text-decoration: none; }
 .port-tool { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .cmd-box, #tplOut { min-width: 0; }
 .port-tool select, .port-tool input { font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; width: 100%; }
+.port-tool input[type="checkbox"] { width: auto; padding: 0; }
+.port-tool input:disabled { opacity: .5; }
+.pe-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.pe-row input:not([type]) { flex: 1; min-width: 140px; width: auto; }
+.pe-vlans { color: var(--text); line-height: 1.9; }
+.pe-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 0 0 4px; }
+.pe-x:hover { color: var(--sev-high); }
+.vl.pe-add { border-color: #2e8b57; color: #2e8b57; }
+.vl.pe-del { text-decoration: line-through; color: var(--sev-high); border-style: dashed; }
+.pe-del-row { margin-top: 2px; }
 
 /* ---------- эталон ---------- */
 .std-sum { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
